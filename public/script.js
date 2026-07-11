@@ -201,9 +201,9 @@ async function switchSession(sessionId) {
     if (data.sessionLogs && data.sessionLogs.length > 0) {
       data.sessionLogs.forEach(log => {
         chatHistory.push({ role: 'user', content: log.user_message });
-        appendMessage('user', log.user_message, false, log.attached_asset || null);
+        appendMessage('user', log.user_message, false, log.attached_asset || null, log.created_at);
         chatHistory.push({ role: 'assistant', content: log.ai_response });
-        appendMessage('ai', log.ai_response);
+        appendMessage('ai', log.ai_response, false, null, log.created_at);
       });
     } else {
       renderEmptyState();
@@ -417,8 +417,8 @@ if (modeTabsWrap) {
 }
 
 // ─── RENDER ENGINE & UTILITIES ───────────────────────
-function getTime() {
-  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function getTime(date) {
+  return (date ? new Date(date) : new Date()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 function scrollToBottom(smooth = true) {
@@ -553,7 +553,7 @@ function tagFor(role) {
   return role === 'ai' ? 'NOCTURNAL_01' : 'YOU';
 }
 
-function appendMessage(role, text, typing = false, imageDataUrl = null) {
+function appendMessage(role, text, typing = false, imageDataUrl = null, sentAt = null) {
   const row = document.createElement('div');
   row.classList.add('row', role === 'ai' ? 'ai' : 'user');
   if (typing) row.classList.add('thinking');
@@ -562,11 +562,7 @@ function appendMessage(role, text, typing = false, imageDataUrl = null) {
   tag.classList.add('row-tag');
   const tagLabel = document.createElement('span');
   tagLabel.textContent = tagFor(role);
-  const ts = document.createElement('span');
-  ts.classList.add('ts');
-  ts.textContent = getTime();
   tag.appendChild(tagLabel);
-  tag.appendChild(ts);
 
   const content = document.createElement('div');
   content.classList.add('row-content');
