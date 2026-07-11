@@ -68,7 +68,7 @@ The landing page is a dark, "classified terminal" style aesthetic — black back
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/<your-username>/nocturnal-ai.git
+git clone https://github.com/WizzBot-offi/nocturnal-ai.git
 cd nocturnal-ai
 npm install
 ```
