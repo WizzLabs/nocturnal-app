@@ -1,6 +1,6 @@
 // ─── STATE MANAGEMENT ────────────────────────────────
 let currentSessionId = localStorage.getItem('current_session_id') || 'session_' + Date.now();
-let attachedImageBase64 = null; 
+let attachedImageBase64 = null;
 let chatHistory = [];
 let isThinking = false;
 let currentMode = "flash";
@@ -10,10 +10,7 @@ let currentRequestId = 0;
 
 localStorage.setItem('current_session_id', currentSessionId);
 
-// ─── AUTH TOKEN (Sprint 2: per-user isolation) ───────
-// Cached once on page load so every fetch() to a protected route can attach
-// it. Dynamic import used (same pattern as the existing logout block below)
-// so this file doesn't need to become an ES module.
+// ─── AUTH TOKEN ───────────────────────────────────────
 let cachedAuthToken = null;
 
 async function initAuthToken() {
@@ -25,7 +22,6 @@ async function initAuthToken() {
     const { data: { session } } = await supabase.auth.getSession();
     cachedAuthToken = session?.access_token || null;
     if (!cachedAuthToken) {
-      // No valid session — bounce to auth page rather than let requests 401 silently
       window.location.replace('/auth.html');
     }
   } catch (err) {
@@ -42,29 +38,24 @@ const messagesEl = document.getElementById('messages');
 const inputEl    = document.getElementById('input');
 const sendBtn    = document.getElementById('send-btn');
 
-// FIX: emptyState is referenced by ID each time it's needed (not cached once at startup),
-// because newChatBtn replaces the innerHTML of messagesEl which destroys the old node.
 function getEmptyState() {
   return document.getElementById('empty-state');
 }
 
-const modeDropdown = document.querySelector(".mode-dropdown");
-const modeSelected = document.querySelector(".mode-selected");
-const modeOptions  = document.querySelector(".mode-options");
+const modeTabsWrap = document.getElementById('mode-tabs');
 
-const sidebar          = document.getElementById('sidebar');
-const menuToggleBtn    = document.getElementById("menu-toggle-btn");   // mobile header btn
-const sidebarToggleBtn = document.getElementById("sidebar-toggle-btn"); // desktop collapse btn
-const sidebarBackdrop  = document.getElementById("sidebar-backdrop");
-const newChatBtn       = document.getElementById('new-chat-btn');
-const fileUploader     = document.getElementById('file-uploader');
-const attachBtn        = document.getElementById('attach-btn');
-const imagePreviewBox  = document.getElementById('image-preview-box');
-const previewImg       = document.getElementById('preview-img');
-const removeImgBtn     = document.getElementById('remove-img-btn');
-const chatHistoryList  = document.getElementById('chat-history-list');
-
-// FIX: was querying '#search-histories' but HTML uses id="search-chats"
+const shellEl           = document.getElementById('shell');
+const sidebar           = document.getElementById('sidebar');
+const menuToggleBtn      = document.getElementById("menu-toggle-btn");
+const sidebarToggleBtn   = document.getElementById("sidebar-toggle-btn");
+const sidebarBackdrop    = document.getElementById("sidebar-backdrop");
+const newChatBtn         = document.getElementById('new-chat-btn');
+const fileUploader       = document.getElementById('file-uploader');
+const attachBtn          = document.getElementById('attach-btn');
+const imagePreviewBox    = document.getElementById('image-preview-box');
+const previewImg         = document.getElementById('preview-img');
+const removeImgBtn       = document.getElementById('remove-img-btn');
+const chatHistoryList    = document.getElementById('chat-history-list');
 const historySearchInput = document.getElementById('search-chats');
 
 // ─── SIDEBAR CHAT HISTORY & SEARCH ───────────────────
@@ -86,18 +77,6 @@ async function loadSidebarHistory() {
       item.classList.add('history-item');
       if (session.session_id === currentSessionId) item.classList.add('active');
 
-      // Chat icon
-      const iconEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      iconEl.setAttribute('width', '14');
-      iconEl.setAttribute('height', '14');
-      iconEl.setAttribute('viewBox', '0 0 24 24');
-      iconEl.setAttribute('fill', 'none');
-      iconEl.setAttribute('stroke', 'currentColor');
-      iconEl.setAttribute('stroke-width', '2');
-      iconEl.style.flexShrink = '0';
-      iconEl.style.opacity = '0.6';
-      iconEl.innerHTML = '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>';
-
       // Title text (static display)
       const textEl = document.createElement('span');
       textEl.classList.add('history-preview');
@@ -114,22 +93,19 @@ async function loadSidebarHistory() {
       const actionsEl = document.createElement('div');
       actionsEl.classList.add('session-actions');
 
-      // Rename button
       const renameBtn = document.createElement('button');
       renameBtn.classList.add('rename-session-btn');
       renameBtn.title = 'Rename this chat';
-      renameBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>`;
+      renameBtn.textContent = '✎';
 
-      // Delete button
       const deleteBtn = document.createElement('button');
       deleteBtn.classList.add('delete-session-btn');
       deleteBtn.title = 'Delete this chat';
-      deleteBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v6M14 11v6"></path><path d="M9 6V4h6v2"></path></svg>`;
+      deleteBtn.textContent = '✕';
 
       actionsEl.appendChild(renameBtn);
       actionsEl.appendChild(deleteBtn);
 
-      item.appendChild(iconEl);
       item.appendChild(textEl);
       item.appendChild(renameInput);
       item.appendChild(actionsEl);
@@ -196,13 +172,11 @@ async function loadSidebarHistory() {
   }
 }
 
-// FIX: Delete session — calls DELETE endpoint, then clears UI if it was active
 async function deleteSession(sessionId) {
   try {
     const res = await fetch(`/sessions/${sessionId}`, { method: 'DELETE', headers: authHeaders() });
     if (!res.ok) throw new Error('Delete failed');
 
-    // If we just deleted the active session, start a fresh chat
     if (sessionId === currentSessionId) {
       startNewChat();
     }
@@ -219,11 +193,11 @@ async function switchSession(sessionId) {
   chatHistory = [];
   if (messagesEl) messagesEl.innerHTML = '';
   hideEmpty();
-  
+
   try {
     const res = await fetch(`/sessions/${sessionId}`, { headers: authHeaders() });
     const data = await res.json();
-    
+
     if (data.sessionLogs && data.sessionLogs.length > 0) {
       data.sessionLogs.forEach(log => {
         chatHistory.push({ role: 'user', content: log.user_message });
@@ -232,8 +206,7 @@ async function switchSession(sessionId) {
         appendMessage('ai', log.ai_response);
       });
     } else {
-      const es = getEmptyState();
-      if (es) es.style.display = 'flex';
+      renderEmptyState();
     }
   } catch (err) {
     console.error("Error switching conversation context:", err);
@@ -254,93 +227,118 @@ if (historySearchInput) {
 }
 
 // ─── SIDEBAR TOGGLES ─────────────────────────────────
-// Persist collapsed state across page loads
 let sidebarCollapsed = localStorage.getItem('sidebar_collapsed') === 'true';
 
 function isMobile() { return window.innerWidth <= 768; }
 
 function applySidebarState() {
-  if (!sidebar) return;
+  if (!shellEl) return;
   if (isMobile()) {
-    // Mobile: use overlay pattern — collapsed class means nothing here
-    sidebar.classList.remove('collapsed');
+    shellEl.classList.remove('collapsed');
+    if (sidebar) sidebar.classList.remove('mobile-open');
   } else {
-    // Desktop: toggle collapsed icon-rail
-    sidebar.classList.toggle('collapsed', sidebarCollapsed);
+    shellEl.classList.toggle('collapsed', sidebarCollapsed);
   }
 }
 
 function closeMobileSidebar() {
-  sidebar.classList.remove('mobile-open');
+  if (sidebar) sidebar.classList.remove('mobile-open');
   if (sidebarBackdrop) sidebarBackdrop.classList.remove('visible');
 }
 
 function openMobileSidebar() {
-  sidebar.classList.add('mobile-open');
+  if (sidebar) sidebar.classList.add('mobile-open');
   if (sidebarBackdrop) sidebarBackdrop.classList.add('visible');
 }
 
-// Desktop toggle btn (lives inside sidebar)
-if (sidebarToggleBtn && sidebar) {
+if (sidebarToggleBtn) {
   sidebarToggleBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (isMobile()) {
+    sidebarCollapsed = !sidebarCollapsed;
+    localStorage.setItem('sidebar_collapsed', sidebarCollapsed);
+    applySidebarState();
+  });
+}
+
+if (menuToggleBtn) {
+  menuToggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (sidebar && sidebar.classList.contains('mobile-open')) {
       closeMobileSidebar();
     } else {
-      sidebarCollapsed = !sidebarCollapsed;
-      localStorage.setItem('sidebar_collapsed', sidebarCollapsed);
-      applySidebarState();
+      openMobileSidebar();
     }
   });
 }
 
-// Mobile header hamburger btn
-if (menuToggleBtn && sidebar) {
-  menuToggleBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    openMobileSidebar();
-  });
-}
-
-// Backdrop click closes mobile sidebar
 if (sidebarBackdrop) {
   sidebarBackdrop.addEventListener('click', closeMobileSidebar);
 }
 
-// Apply initial state
 applySidebarState();
 window.addEventListener('resize', applySidebarState);
+
+// ─── EMPTY STATE MARKUP ───────────────────────────────
+const PROMPT_POOL = [
+  "Refactor this function for readability, not just brevity",
+  "Explain the tradeoffs before you pick an approach",
+  "Rewrite this paragraph so it sounds like a person wrote it",
+  "Find the bug, don't just patch the symptom",
+  "Give me the blunt version of this feedback",
+  "Turn these bullet points into a short brief",
+  "What's the simplest way to test this?",
+  "Poke holes in this plan before I commit to it",
+  "Summarize this thread in three sentences",
+  "Help me name this thing better",
+  "What am I missing in this argument?",
+  "Draft a reply that's firm but not rude",
+  "Explain this like I'm reading it for the first time",
+  "Compare these two options honestly",
+  "Tighten this without losing the meaning",
+];
+
+function pickRandomPrompts(n = 4) {
+  const pool = [...PROMPT_POOL];
+  const picks = [];
+  while (picks.length < n && pool.length) {
+    const i = Math.floor(Math.random() * pool.length);
+    picks.push(pool.splice(i, 1)[0]);
+  }
+  return picks;
+}
+
+function renderEmptyState() {
+  if (!messagesEl) return;
+  const prompts = pickRandomPrompts(4);
+  const items = prompts.map((p, i) => `
+        <button class="prompt-item" data-prompt="${p.replace(/"/g, '&quot;')}"><span class="prompt-index">${String(i + 1).padStart(2, '0')} —</span><span class="prompt-text">${p}</span></button>`).join('');
+  messagesEl.innerHTML = `
+    <div id="empty-state" class="empty-state">
+      <div class="empty-heading">Start a session</div>
+      <p class="empty-sub">Ask me anything. I'm here to help you think, create, and explore.</p>
+      <div class="prompt-list" id="prompt-list">${items}
+      </div>
+    </div>`;
+}
+
+// Event delegation so prompt buttons work even after messagesEl.innerHTML is replaced
+if (messagesEl) {
+  messagesEl.addEventListener('click', (e) => {
+    const promptBtn = e.target.closest('.prompt-item');
+    if (!promptBtn || !inputEl) return;
+    inputEl.value = promptBtn.dataset.prompt || promptBtn.textContent.trim();
+    autoResize();
+    if (sendBtn) sendBtn.disabled = inputEl.value.trim() === '';
+    inputEl.focus();
+  });
+}
 
 // ─── NEW CHAT ─────────────────────────────────────────
 function startNewChat() {
   chatHistory = [];
   currentSessionId = 'session_' + Date.now();
   localStorage.setItem('current_session_id', currentSessionId);
-  if (messagesEl) {
-    messagesEl.innerHTML = `
-      <div id="empty-state">
-        <div class="void-logo">
-          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;">
-            <path stroke="#00FF66" stroke-width="2.2" stroke-linecap="round" d="M35,8 C10,22 18,42 48,49"/>
-            <path stroke="#00FF66" stroke-width="2.2" stroke-linecap="round" d="M65,8 C90,22 82,42 52,49"/>
-            <path stroke="#00FF66" stroke-width="2.2" stroke-linecap="round" d="M35,92 C10,78 18,58 48,51"/>
-            <path stroke="#00FF66" stroke-width="2.2" stroke-linecap="round" d="M65,92 C90,78 82,58 52,51"/>
-            <path stroke="#00FF66" stroke-width="1.6" stroke-linecap="round" opacity="0.65" d="M8,38 C22,10 42,18 49,48"/>
-            <path stroke="#00FF66" stroke-width="1.6" stroke-linecap="round" opacity="0.65" d="M8,62 C22,90 42,82 49,52"/>
-            <path stroke="#00FF66" stroke-width="1.6" stroke-linecap="round" opacity="0.65" d="M92,38 C78,10 58,18 51,48"/>
-            <path stroke="#00FF66" stroke-width="1.6" stroke-linecap="round" opacity="0.65" d="M92,62 C78,90 58,82 51,52"/>
-            <circle cx="50" cy="50" r="38" stroke="#00FF66" stroke-width="0.5" opacity="0.12"/>
-            <circle cx="50" cy="50" r="24" stroke="#00FF66" stroke-width="0.4" opacity="0.09"/>
-            <circle cx="50" cy="50" r="3" fill="#00FF66"/>
-          </svg>
-        </div>
-        <h2>Hello, I'm Nocturnal</h2>
-        <p>Ask me anything. I'm here to help you think, create, and explore.</p>
-      </div>`;
-  }
-  // FIX: re-query after innerHTML replacement so we get the fresh node
-  const es = getEmptyState();
-  if (es) es.style.display = 'flex';
+  renderEmptyState();
   clearImageAttachment();
 }
 
@@ -383,10 +381,9 @@ if (fileUploader) {
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, width, height);
-          // FIX: Use higher quality (0.92) for better model readability
           attachedImageBase64 = canvas.toDataURL('image/jpeg', 0.92);
           if (previewImg) previewImg.src = attachedImageBase64;
-          if (imagePreviewBox) imagePreviewBox.style.display = 'block';
+          if (imagePreviewBox) imagePreviewBox.classList.add('show');
           if (attachBtn) attachBtn.classList.add('has-file');
         }
       };
@@ -402,37 +399,22 @@ if (removeImgBtn) {
 function clearImageAttachment() {
   attachedImageBase64 = null;
   if (fileUploader) fileUploader.value = '';
-  if (imagePreviewBox) imagePreviewBox.style.display = 'none';
+  if (imagePreviewBox) imagePreviewBox.classList.remove('show');
   if (previewImg) previewImg.src = '';
   if (attachBtn) attachBtn.classList.remove('has-file');
 }
 
-// ─── MODE DROPDOWN ────────────────────────────────────
-if (modeSelected) {
-  modeSelected.addEventListener("click", () => {
-    if (modeOptions) modeOptions.classList.toggle("show");
-  });
-}
-
-if (modeOptions) {
-  modeOptions.querySelectorAll("div").forEach(opt => {
-    opt.addEventListener("click", () => {
-      modeOptions.querySelectorAll("div").forEach(o => o.classList.remove("active"));
-      opt.classList.add("active");
-      currentMode = opt.dataset.value || "flash";
-      if (modeSelected) modeSelected.textContent = opt.textContent;
-      modeOptions.classList.remove("show");
+// ─── MODE TABS ────────────────────────────────────────
+if (modeTabsWrap) {
+  const tabs = modeTabsWrap.querySelectorAll('.mode-tab');
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      tabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      currentMode = tab.dataset.value || 'flash';
     });
   });
-  const defaultFlash = modeOptions.querySelector('[data-value="flash"]');
-  if (defaultFlash) defaultFlash.classList.add("active");
 }
-
-document.addEventListener("click", (e) => {
-  if (modeDropdown && !modeDropdown.contains(e.target)) {
-    if (modeOptions) modeOptions.classList.remove("show");
-  }
-});
 
 // ─── RENDER ENGINE & UTILITIES ───────────────────────
 function getTime() {
@@ -440,16 +422,16 @@ function getTime() {
 }
 
 function scrollToBottom(smooth = true) {
-  if (messagesEl) {
-    messagesEl.scrollTo({
-      top: messagesEl.scrollHeight,
+  const wrap = document.getElementById('log-wrap');
+  if (wrap) {
+    wrap.scrollTo({
+      top: wrap.scrollHeight,
       behavior: smooth ? 'smooth' : 'instant'
     });
   }
 }
 
 function hideEmpty() {
-  // FIX: re-query live each time so we always get the current DOM node
   const es = getEmptyState();
   if (es) es.style.display = 'none';
 }
@@ -514,7 +496,7 @@ function renderMarkdown(text) {
         if (/^[A-Z][^a-z]*:$/.test(trimmed) || /^\d+\.\s+\*\*/.test(trimmed)) {
           const hLine = document.createElement('div');
           hLine.classList.add('md-heading');
-          hLine.textContent = trimmed.replace(/\*\ Third*/g, '').replace(/^\d+\.\s+/, '');
+          hLine.textContent = trimmed.replace(/\*\*/g, '').replace(/^\d+\.\s+/, '');
           div.appendChild(hLine);
           return;
         }
@@ -554,42 +536,52 @@ function setStopMode(isStop) {
   if (!sendBtn) return;
   if (isStop) {
     sendBtn.disabled = false;
-    sendBtn.innerHTML = "⏹";
-    sendBtn.style.background = "#ff4d4d";
+    sendBtn.textContent = "[ STOP ]";
+    sendBtn.style.background = "#e0616b";
+    sendBtn.style.color = "#0b0c0d";
     sendBtn.title = "Stop";
   } else {
-    sendBtn.innerHTML = `
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="white">
-        <path d="M14 8L2 2L5.5 8L2 14L14 8Z"/>
-      </svg>`;
+    sendBtn.textContent = "[ SEND ]";
     sendBtn.style.background = "";
+    sendBtn.style.color = "";
     sendBtn.title = "Send message";
   }
 }
 
+// role tag label, e.g. "YOU" / "NOCTURNAL_01"
+function tagFor(role) {
+  return role === 'ai' ? 'NOCTURNAL_01' : 'YOU';
+}
+
 function appendMessage(role, text, typing = false, imageDataUrl = null) {
   const row = document.createElement('div');
-  row.classList.add('msg-row', role);
+  row.classList.add('row', role === 'ai' ? 'ai' : 'user');
   if (typing) row.classList.add('thinking');
 
-  const inner = document.createElement('div');
-  inner.classList.add('msg-inner');
+  const tag = document.createElement('div');
+  tag.classList.add('row-tag');
+  const tagLabel = document.createElement('span');
+  tagLabel.textContent = tagFor(role);
+  const ts = document.createElement('span');
+  ts.classList.add('ts');
+  ts.textContent = getTime();
+  tag.appendChild(tagLabel);
+  tag.appendChild(ts);
 
-  const bubble = document.createElement('div');
-  bubble.classList.add('bubble');
+  const content = document.createElement('div');
+  content.classList.add('row-content');
 
   if (typing) {
     const dots = document.createElement('div');
     dots.classList.add('dots');
     for (let i = 0; i < 3; i++) dots.appendChild(document.createElement('span'));
-    bubble.appendChild(dots);
+    content.appendChild(dots);
     const label = document.createElement('span');
-    label.textContent = 'Nocturnal is thinking';
-    bubble.appendChild(label);
+    label.textContent = 'processing…';
+    content.appendChild(label);
   } else if (role === 'ai' && text) {
-    bubble.appendChild(renderMarkdown(text));
+    content.appendChild(renderMarkdown(text));
   } else {
-    // User bubble — show image above text if present
     if (imageDataUrl) {
       const imgWrap = document.createElement('div');
       imgWrap.classList.add('chat-image-wrap');
@@ -598,49 +590,23 @@ function appendMessage(role, text, typing = false, imageDataUrl = null) {
       img.src = imageDataUrl;
       img.alt = 'Attached image';
       imgWrap.appendChild(img);
-      bubble.appendChild(imgWrap);
+      content.appendChild(imgWrap);
     }
     if (text) {
       const textNode = document.createElement('div');
+      textNode.classList.add('md-line');
       textNode.textContent = text;
-      bubble.appendChild(textNode);
+      content.appendChild(textNode);
     }
   }
 
-  const ts = document.createElement('div');
-  ts.classList.add('ts');
-  ts.textContent = getTime();
-
-  inner.appendChild(bubble);
-  inner.appendChild(ts);
-
-  if (role === 'ai') {
-    const avatar = document.createElement('div');
-    avatar.classList.add('avatar');
-    avatar.innerHTML = `<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;">
-      <path stroke="#00FF66" stroke-width="2.2" stroke-linecap="round" d="M35,8 C10,22 18,42 48,49"/>
-      <path stroke="#00FF66" stroke-width="2.2" stroke-linecap="round" d="M65,8 C90,22 82,42 52,49"/>
-      <path stroke="#00FF66" stroke-width="2.2" stroke-linecap="round" d="M35,92 C10,78 18,58 48,51"/>
-      <path stroke="#00FF66" stroke-width="2.2" stroke-linecap="round" d="M65,92 C90,78 82,58 52,51"/>
-      <path stroke="#00FF66" stroke-width="1.6" stroke-linecap="round" opacity="0.65" d="M8,38 C22,10 42,18 49,48"/>
-      <path stroke="#00FF66" stroke-width="1.6" stroke-linecap="round" opacity="0.65" d="M8,62 C22,90 42,82 49,52"/>
-      <path stroke="#00FF66" stroke-width="1.6" stroke-linecap="round" opacity="0.65" d="M92,38 C78,10 58,18 51,48"/>
-      <path stroke="#00FF66" stroke-width="1.6" stroke-linecap="round" opacity="0.65" d="M92,62 C78,90 58,82 51,52"/>
-      <circle cx="50" cy="50" r="38" stroke="#00FF66" stroke-width="0.5" opacity="0.12"/>
-      <circle cx="50" cy="50" r="24" stroke="#00FF66" stroke-width="0.4" opacity="0.09"/>
-      <circle cx="50" cy="50" r="3" fill="#00FF66"/>
-    </svg>`;
-    row.appendChild(avatar);
-    row.appendChild(inner);
-  } else {
-    row.appendChild(inner);
-  }
+  row.appendChild(tag);
+  row.appendChild(content);
 
   if (messagesEl) messagesEl.appendChild(row);
   scrollToBottom();
-  return { row, bubble };
+  return { row, bubble: content };
 }
-
 
 function typeText(bubble, text, requestId, speed = 14) {
   return new Promise(resolve => {
@@ -686,7 +652,7 @@ async function sendMessage() {
   hideEmpty();
 
   chatHistory.push({ role: 'user', content: text });
-  const imageToSend = attachedImageBase64; // capture before clearImageAttachment wipes it
+  const imageToSend = attachedImageBase64;
   appendMessage('user', text, false, imageToSend);
   inputEl.value = '';
   autoResize();
@@ -702,12 +668,12 @@ async function sendMessage() {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
       signal: controller.signal,
-      body: JSON.stringify({ 
-        message: text, 
-        history: chatHistory, 
+      body: JSON.stringify({
+        message: text,
+        history: chatHistory,
         mode: currentMode,
-        sessionId: currentSessionId, 
-        image: attachedImageBase64   
+        sessionId: currentSessionId,
+        image: attachedImageBase64
       }),
     });
 
@@ -786,6 +752,7 @@ if (sendBtn) {
 
 // Initialize
 if (inputEl) inputEl.focus();
+renderEmptyState();
 (async () => {
   await initAuthToken();
   loadSidebarHistory();
@@ -795,27 +762,21 @@ if (inputEl) inputEl.focus();
 const logoutBtn = document.getElementById('logout-btn');
 if (logoutBtn) {
   logoutBtn.addEventListener('click', async () => {
-    // Show loading state on button (optional, but good UX)
-    const originalText = logoutBtn.innerHTML;
-    logoutBtn.innerHTML = '<span class="btn-label" style="max-width:200px;opacity:1;">Logging out...</span>';
-    
+    const originalText = logoutBtn.textContent;
+    logoutBtn.textContent = '[ LOGGING OUT… ]';
+
     try {
-      // 1. Fetch config to get Supabase URL and Anon Key
       const res = await fetch('/api/config');
       const { supabaseUrl, supabaseAnonKey } = await res.json();
-      
-      // 2. Import Supabase client dynamically to avoid turning script.js into a module
+
       const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2');
       const supabase = createClient(supabaseUrl, supabaseAnonKey);
-      
-      // 3. Sign out via Supabase
+
       await supabase.auth.signOut();
-      
-      // 4. Redirect
+
       window.location.replace('/auth.html');
     } catch (e) {
       console.error('Logout error:', e);
-      // Fallback: manually remove session if network fails
       localStorage.removeItem('sb-pumnywxnpwgmurjqtdhr-auth-token');
       window.location.replace('/auth.html');
     }
