@@ -1,13 +1,28 @@
 # Nocturnal AI
 
-A full-stack, self-hosted AI chat application with per-user authentication, isolated chat history, and optional "bring your own key" (BYOK) support — built with Node.js, Express, Groq, and Supabase.
+A full-stack, self-hosted AI chat application with per-user authentication, isolated chat history, voice input/output, and optional "bring your own key" (BYOK) support — built with Node.js, Express, Groq, and Supabase.
 
 ![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![Express](https://img.shields.io/badge/express-5.x-000000)
 ![License](https://img.shields.io/badge/license-ISC-blue)
+![Status](https://img.shields.io/badge/status-v1.0-00FF66)
 
 **Live:**
 - 🌐 Landing page — [nocturnal-app.vercel.app](https://nocturnal-app.vercel.app/)
 - 💬 App / chat — [nocturnal-app.onrender.com](https://nocturnal-app.onrender.com/)
+
+![Nocturnal chat demo](assets/demo-chat.gif)
+
+---
+
+## Highlights
+
+- **Multi-model routing** — Flash / Insight / Abyss / Auto, switchable per message
+- **Full voice pipeline** — browser speech-to-text with a Groq Whisper fallback, and multilingual browser text-to-speech
+- **Personality system** — response-style presets plus free-form custom instructions, applied server-side
+- **BYOK** — bring your own API key and model, used in place of the server defaults
+- **Per-user data isolation** — Supabase Row Level Security on every chat session
+- **Terminal-editorial UI** — dark, monospace, emerald-accented interface, fully responsive on mobile
 
 ---
 
@@ -26,22 +41,64 @@ The landing page is a dark, "classified terminal" style aesthetic — black back
 ## Features (App)
 
 - 🔐 **Authentication** — Supabase email/password auth with session persistence and an auth guard on every protected route.
-- 🔒 **Per-user chat isolation** — every conversation is scoped to its owner; no user can read, rename, or delete another user's sessions.
-- 💬 **AI chat with auto-routing** — messages are automatically routed to the right model based on content:
-  - **Flash** — fast, short answers (also the vision-capable model for image uploads)
+- 🔒 **Per-user chat isolation** — every conversation is scoped to its owner via Row Level Security; no user can read, rename, or delete another user's sessions.
+- 💬 **AI chat with selectable modes**:
+  - **Flash** — fast, short answers (also the vision-capable model, used automatically for image uploads)
   - **Insight** — balanced, code/technical-focused responses
   - **Abyss** — deep, deliberate reasoning for complex questions
+  - **Auto** — picks Flash, Insight, or Abyss based on the content of your message
+- 🎙️ **Voice input** — browser-native `SpeechRecognition` for live dictation, with a Groq Whisper fallback for uploaded audio clips or unsupported browsers. Usage is tracked against a daily voice quota.
+- 🔊 **Voice output (TTS)** — browser `speechSynthesis`, entirely client-side. Picks the closest installed voice to the AI response's detected language (exact locale → same language family → browser default), and fails silently if nothing suitable is installed.
+- 🎭 **Personality system** — choose a response-style preset (Professional, Casual, Creative, Technical) and optionally add custom instructions; applied server-side on every request.
 - 🖼️ **Image upload with vision** — attach an image and ask questions about it.
 - 📝 **Markdown + code blocks** — clean rendering with copyable code blocks.
-- 🗂️ **Session management** — rename, delete, and revisit past conversations from the sidebar.
+- 🗂️ **Session management** — search, rename, delete, and revisit past conversations from the sidebar.
 - 🔑 **Personal AI configuration (BYOK)** — optionally configure your own API key and model. When active, it's used for every request instead of Nocturnal's defaults, and image uploads are validated against known vision-capable models rather than silently falling back.
+- 💬 **In-app feedback** — a Feedback modal linking to a feedback form and the creator's portfolio.
 - 🛡️ **Security hardening**
   - Helmet.js with a scoped Content Security Policy
-  - Per-user (fallback per-IP) rate limiting on AI requests
+  - Per-user (fallback per-IP) rate limiting on AI and voice requests
   - Input validation (message length, image size/type)
   - Environment-aware CORS allowlist
   - Request timeouts with graceful upstream-failure handling
   - Personal API keys encrypted at rest (AES-256-GCM)
+
+---
+
+## Voice Features
+
+Voice input and output are both handled entirely in the browser where possible, with a server-side fallback only for transcription:
+
+- **Speech-to-text** — `SpeechRecognition` runs live in supported browsers; audio clip uploads or unsupported browsers fall back to Groq Whisper transcription.
+- **Text-to-speech** — `speechSynthesis.getVoices()` only, no external APIs. Detects the response's language and prefers an exact-locale voice, then same language family, then the browser default.
+- **Playback state** — only one message can be speaking at a time; the speaker icon animates while active and returns to idle when playback finishes or is cancelled.
+- **Voice quota** — daily voice usage is tracked per user and shown in the input bar.
+
+![Voice input/output demo](assets/demo-voice.gif)
+
+---
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%">
+
+**Empty state**
+![Empty state](assets/empty-state.png)
+
+</td>
+<td width="50%">
+
+**Chat interface**
+![Chat interface](assets/chat-interface.png)
+
+</td>
+</tr>
+</table>
+
+**Customization — Personality, AI Settings, Feedback**
+![Customization](assets/customization.png)
 
 ---
 
@@ -50,10 +107,21 @@ The landing page is a dark, "classified terminal" style aesthetic — black back
 | Layer | Technology |
 |---|---|
 | Frontend | HTML, CSS, vanilla JavaScript |
-| Backend | Node.js, Express |
-| AI Inference | [Groq](https://groq.com) |
+| Backend | Node.js, Express 5 |
+| AI Inference | [Groq](https://groq.com) (Llama 4 Scout, Llama 3.3 70B, Qwen3 32B) |
 | Auth & Database | [Supabase](https://supabase.com) (Postgres + Auth, with Row Level Security) |
-| Security | Helmet, express-rate-limit |
+| Voice | Browser SpeechRecognition + speechSynthesis, Groq Whisper (fallback transcription) |
+| File uploads | Multer (in-memory, image/audio) |
+| Security | Helmet, express-rate-limit, AES-256-GCM (key encryption) |
+
+---
+
+## Architecture Overview
+
+- **Client** (`public/`) — static HTML/CSS/vanilla JS, no build step. `script.js` drives chat, voice, and session UI; `settings.js`, `personality.js`, and `feedback.js` each own a single modal and talk to their own API routes.
+- **Server** (`server.js`) — a single Express app exposing chat, voice, session, and settings routes behind an auth middleware that verifies the Supabase session token on every request.
+- **AI pipeline** — mode (Flash/Insight/Abyss/Auto) and personality are resolved server-side per request, then sent to Groq. BYOK users' personal key/model are decrypted and substituted in place of the server defaults.
+- **Database** — Supabase Postgres holds chat logs, voice usage, AI settings, and personality preferences, all scoped by `user_id` and enforced with Row Level Security.
 
 ---
 
@@ -68,7 +136,7 @@ The landing page is a dark, "classified terminal" style aesthetic — black back
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/WizzBot-offi/nocturnal-ai.git
+git clone https://github.com/<your-username>/nocturnal-ai.git
 cd nocturnal-ai
 npm install
 ```
@@ -98,7 +166,9 @@ Run the migrations in `migrations/` against your Supabase project, **in order**,
 
 1. `001_add_user_id_to_chat_logs.sql` — adds per-user ownership to chat history
 2. `002_enable_rls_chat_logs.sql` — enables Row Level Security (run only after confirming the app works correctly with #1)
-3. `003_create_user_ai_settings.sql` — creates the table for personal AI (BYOK) configuration
+3. `003_add_voice_usage.sql` — creates the table for daily voice quota tracking
+4. `004_add_ai_settings.sql` — creates the table for personal AI (BYOK) configuration
+5. `005_add_user_personality.sql` — creates the table for personality presets and custom instructions
 
 ### 4. Run the app
 
@@ -121,8 +191,10 @@ nocturnal-ai/
 │   ├── auth.html           # Login / signup page
 │   ├── auth-guard.js       # Client-side session check (redirects unauthenticated users)
 │   ├── auth.js              # Login / signup logic
-│   ├── script.js            # Chat UI logic
+│   ├── script.js            # Chat, voice, and session UI logic
 │   ├── settings.js          # Personal AI (BYOK) settings modal
+│   ├── personality.js       # Personality (response style) modal
+│   ├── feedback.js          # Feedback modal
 │   └── style.css             # App styling
 ├── .env.example
 └── package.json
@@ -135,7 +207,7 @@ nocturnal-ai/
 - Never commit your `.env` file — it contains live secrets. It's excluded via `.gitignore`.
 - The Supabase **service role key** bypasses Row Level Security and must only ever be used server-side (as it is here).
 - Personal API keys submitted via the BYOK settings are encrypted before being stored and are never returned in any API response or logged in plaintext.
-- Rate limits are tuned for demo/personal use, not high-traffic production load — adjust `chatLimiter` in `server.js` if deploying more broadly.
+- Rate limits are tuned for demo/personal use, not high-traffic production load — adjust the relevant limiters in `server.js` if deploying more broadly.
 
 ---
 
@@ -149,11 +221,17 @@ Because these are on different domains, `FRONTEND_URL` on the Render service mus
 
 ## Roadmap
 
-- [ ] Deployment guide / production polish
+- [ ] Expanded deployment/production guide
 - [ ] Spend tracking per user
 - [ ] Migrate stored images from base64 to Supabase Storage
 
 ---
+
+## Creator
+
+Designed and engineered by Wizz.
+
+Portfolio: [https://wizzbot-offi.vercel.app/](https://wizzbot-offi.vercel.app/)
 
 ## License
 
