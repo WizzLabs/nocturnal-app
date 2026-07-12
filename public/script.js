@@ -58,6 +58,17 @@ const removeImgBtn       = document.getElementById('remove-img-btn');
 const chatHistoryList    = document.getElementById('chat-history-list');
 const historySearchInput = document.getElementById('search-chats');
 
+// ─── VOICE (STT/TTS) DOM ELEMENTS ────────────────────
+const micBtn              = document.getElementById('mic-btn');
+const attachMenu           = document.getElementById('attach-menu');
+const attachImageOption    = document.getElementById('attach-image-option');
+const attachAudioOption    = document.getElementById('attach-audio-option');
+const audioUploader       = document.getElementById('audio-uploader');
+const voiceStatusBar      = document.getElementById('voice-status-bar');
+const voiceStatusText     = document.getElementById('voice-status-text');
+const voiceStatusCancelBtn = document.getElementById('voice-status-cancel-btn');
+const voiceUsageIndicator = document.getElementById('voice-usage-indicator');
+
 // ─── SIDEBAR CHAT HISTORY & SEARCH ───────────────────
 async function loadSidebarHistory() {
   if (!chatHistoryList) return;
@@ -318,6 +329,15 @@ function renderEmptyState() {
       <p class="empty-sub">Ask me anything. I'm here to help you think, create, and explore.</p>
       <div class="prompt-list" id="prompt-list">${items}
       </div>
+      <div class="mode-guide" aria-label="AI mode overview">
+        <span class="mode-guide-item"><b>Flash</b> — Fast responses</span>
+        <span class="mode-guide-sep">/</span>
+        <span class="mode-guide-item"><b>Insight</b> — Better reasoning</span>
+        <span class="mode-guide-sep">/</span>
+        <span class="mode-guide-item"><b>Abyss</b> — Deep thinking</span>
+        <span class="mode-guide-sep">/</span>
+        <span class="mode-guide-item"><b>Auto</b> — Chooses automatically</span>
+      </div>
     </div>`;
 }
 
@@ -351,9 +371,38 @@ if (newChatBtn) {
 }
 
 // ─── IMAGE UPLOAD HANDLING ───────────────────────────
-if (attachBtn) {
-  attachBtn.addEventListener('click', () => {
+// attach-btn now opens a small menu (Image / Audio clip) instead of going
+// straight to the image picker, since audio upload lives here too now.
+// Sprint 6.5: switched from display:none/block toggling to a class-based
+// 'open' state so both the open AND close motion can be animated in CSS
+// (display swaps can't be transitioned).
+function isAttachMenuOpen() { return !!(attachMenu && attachMenu.classList.contains('open')); }
+function openAttachMenu() { if (attachMenu) attachMenu.classList.add('open'); }
+function closeAttachMenu() { if (attachMenu) attachMenu.classList.remove('open'); }
+
+if (attachBtn && attachMenu) {
+  attachBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (isAttachMenuOpen()) closeAttachMenu(); else openAttachMenu();
+  });
+  document.addEventListener('click', (e) => {
+    if (isAttachMenuOpen() && !attachMenu.contains(e.target) && e.target !== attachBtn) {
+      closeAttachMenu();
+    }
+  });
+}
+
+if (attachImageOption) {
+  attachImageOption.addEventListener('click', () => {
+    closeAttachMenu();
     if (fileUploader) fileUploader.click();
+  });
+}
+
+if (attachAudioOption) {
+  attachAudioOption.addEventListener('click', () => {
+    closeAttachMenu();
+    if (audioUploader) audioUploader.click();
   });
 }
 
@@ -404,16 +453,408 @@ function clearImageAttachment() {
   if (attachBtn) attachBtn.classList.remove('has-file');
 }
 
+// ─── VOICE INPUT (STT) ────────────────────────────────
+// Self-contained: records or accepts an uploaded audio clip, sends it to
+// /voice/transcribe, and drops the resulting transcript into the composer
+// for the user to review/edit. Never calls sendMessage() itself — the user
+// always presses Send manually. Reuses authHeaders() from above; does not
+// touch chatHistory, sendMessage(), or the /chat pipeline.
+
+const VOICE_STATES = { IDLE: 'idle', RECORDING: 'recording', UPLOADING: 'uploading', TRANSCRIBING: 'transcribing', READY: 'ready', ERROR: 'error' };
+
+let mediaRecorder = null;
+let recordedChunks = [];
+let voiceState = VOICE_STATES.IDLE;
+let activeVoicePath = null; // 'native' | 'whisper' | null — drives which status label shows
+
+function setVoiceState(state, message = '') {
+  voiceState = state;
+  if (!voiceStatusBar || !voiceStatusText) return;
+
+  // Error or cancel: clear the status entirely and restore the normal
+  // composer UI. No lingering banner — the message is still logged for
+  // debugging, just not shown as an intrusive/sticky status.
+  if (state === VOICE_STATES.IDLE || state === VOICE_STATES.ERROR) {
+    if (state === VOICE_STATES.ERROR && message) console.error(message);
+    voiceStatusBar.classList.remove('visible');
+    voiceStatusBar.classList.remove('error');
+    if (micBtn) { micBtn.classList.remove('recording'); micBtn.disabled = false; }
+    voiceState = VOICE_STATES.IDLE;
+    return;
+  }
+
+  let label = '';
+  if (state === VOICE_STATES.RECORDING) {
+    label = activeVoicePath === 'native' ? 'Listening…' : 'Using AI transcription…';
+  } else if (state === VOICE_STATES.UPLOADING || state === VOICE_STATES.TRANSCRIBING) {
+    label = 'Using AI transcription...';
+  } else if (state === VOICE_STATES.READY) {
+    label = '✓ Transcript ready';
+  }
+
+  voiceStatusBar.classList.add('visible');
+  voiceStatusBar.classList.remove('error');
+  voiceStatusText.textContent = label;
+
+  if (micBtn) micBtn.classList.toggle('recording', state === VOICE_STATES.RECORDING);
+  if (micBtn) micBtn.disabled = state === VOICE_STATES.UPLOADING || state === VOICE_STATES.TRANSCRIBING;
+
+  // READY is terminal-but-visible; auto-clear after a moment.
+  if (state === VOICE_STATES.READY) {
+    setTimeout(() => { if (voiceState === state) setVoiceState(VOICE_STATES.IDLE); }, 2000);
+  }
+}
+
+function renderVoiceUsage(usage) {
+  if (!voiceUsageIndicator || !usage) return;
+  const remainMin = Math.floor(usage.remainingSeconds / 60);
+  const remainSec = usage.remainingSeconds % 60;
+  voiceUsageIndicator.textContent = `· voice: ${remainMin}m ${remainSec}s left today`;
+  voiceUsageIndicator.classList.toggle('low', usage.remainingSeconds <= 60);
+}
+
+async function loadVoiceUsage() {
+  try {
+    const res = await fetch('/voice/usage', { headers: authHeaders() });
+    if (!res.ok) return;
+    const usage = await res.json();
+    renderVoiceUsage(usage);
+  } catch (err) {
+    console.error('Failed to load voice usage:', err);
+  }
+}
+
+// Sends an audio Blob to the backend and drops the transcript into the
+// composer. Shared by both the recorder and the file-upload path.
+async function transcribeAudioBlob(blob, filename) {
+  setVoiceState(VOICE_STATES.UPLOADING);
+  try {
+    const formData = new FormData();
+    formData.append('audio', blob, filename);
+
+    setVoiceState(VOICE_STATES.TRANSCRIBING);
+    const res = await fetch('/voice/transcribe', {
+      method: 'POST',
+      headers: authHeaders(), // no Content-Type — browser sets multipart boundary
+      body: formData,
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      setVoiceState(VOICE_STATES.ERROR, data.error || 'Could not transcribe that clip.');
+      return;
+    }
+
+    if (inputEl) {
+      // Append rather than overwrite, in case there's already draft text.
+      const existing = inputEl.value.trim();
+      inputEl.value = existing ? `${existing} ${data.transcript}` : data.transcript;
+      autoResize();
+      if (sendBtn) sendBtn.disabled = inputEl.value.trim() === '';
+      inputEl.focus();
+    }
+
+    if (data.usage) renderVoiceUsage(data.usage);
+    setVoiceState(VOICE_STATES.READY);
+  } catch (err) {
+    console.error('Voice transcription request failed:', err);
+    setVoiceState(VOICE_STATES.ERROR, 'Could not reach the server. Please try again.');
+  }
+}
+
+// ── Native browser Speech Recognition (primary path) ──
+// Zero backend/Groq cost. Used whenever the browser supports it; the
+// existing MediaRecorder → /voice/transcribe (Whisper) flow below only
+// runs as a fallback when this API is unavailable.
+function getSpeechRecognitionCtor() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+let nativeRecognition = null;
+let nativeRecognizing = false;
+
+function startNativeRecognition() {
+  const SpeechRecognitionCtor = getSpeechRecognitionCtor();
+  if (!SpeechRecognitionCtor || !inputEl) return false;
+
+  nativeRecognition = new SpeechRecognitionCtor();
+  nativeRecognition.lang = navigator.language || 'en-US';
+  nativeRecognition.interimResults = true;
+  nativeRecognition.continuous = true;
+
+  const baseText = inputEl.value.trim();
+  let finalTranscript = '';
+
+  nativeRecognition.onresult = (event) => {
+    let interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const chunk = event.results[i][0].transcript;
+      if (event.results[i].isFinal) finalTranscript += chunk + ' ';
+      else interim += chunk;
+    }
+    const combined = [baseText, (finalTranscript + interim).trim()].filter(Boolean).join(' ');
+    inputEl.value = combined;
+    autoResize();
+    if (sendBtn) sendBtn.disabled = inputEl.value.trim() === '';
+  };
+
+  nativeRecognition.onerror = (event) => {
+    console.error('Native speech recognition error:', event.error);
+    nativeRecognizing = false;
+    if (event.error !== 'aborted' && event.error !== 'no-speech') {
+      setVoiceState(VOICE_STATES.ERROR, 'Voice recognition ran into an issue. Please try again.');
+    } else {
+      setVoiceState(VOICE_STATES.IDLE);
+    }
+  };
+
+  nativeRecognition.onend = () => {
+    nativeRecognizing = false;
+    if (voiceState === VOICE_STATES.RECORDING) setVoiceState(VOICE_STATES.READY);
+  };
+
+  nativeRecognition.start();
+  nativeRecognizing = true;
+  activeVoicePath = 'native';
+  setVoiceState(VOICE_STATES.RECORDING);
+  return true;
+}
+
+function stopNativeRecognition() {
+  if (nativeRecognition && nativeRecognizing) nativeRecognition.stop();
+}
+
+// Shown only when falling back to the AI transcription path, so the user
+// understands why this click behaves differently (and that it's metered).
+function showWhisperFallbackNotice() {
+  if (!voiceStatusBar || !voiceStatusText) return;
+  voiceStatusBar.classList.add('visible');
+  voiceStatusBar.classList.remove('error');
+  voiceStatusText.textContent =
+    "Your browser doesn't support native speech recognition. Using AI transcription instead. This consumes your daily voice quota.";
+}
+
+// ── Recording (MediaRecorder) — fallback only ────────
+async function startRecording() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setVoiceState(VOICE_STATES.ERROR, 'Voice recording is not supported in this browser.');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+    mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    recordedChunks = [];
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(track => track.stop());
+      const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+      recordedChunks = [];
+      if (blob.size > 0) transcribeAudioBlob(blob, 'recording.webm');
+      else setVoiceState(VOICE_STATES.IDLE);
+    };
+
+    mediaRecorder.start();
+    activeVoicePath = 'whisper';
+    setVoiceState(VOICE_STATES.RECORDING);
+  } catch (err) {
+    console.error('Microphone access failed:', err);
+    setVoiceState(VOICE_STATES.ERROR, 'Microphone access was denied or unavailable.');
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+}
+
+if (micBtn) {
+  micBtn.addEventListener('click', () => {
+    if (voiceState === VOICE_STATES.RECORDING) {
+      if (nativeRecognizing) stopNativeRecognition();
+      else stopRecording();
+      return;
+    }
+    if (voiceState === VOICE_STATES.IDLE || voiceState === VOICE_STATES.READY || voiceState === VOICE_STATES.ERROR) {
+      if (getSpeechRecognitionCtor()) {
+        startNativeRecognition();
+      } else {
+        showWhisperFallbackNotice();
+        setTimeout(() => startRecording(), 1600); // let the notice be read before mic capture begins
+      }
+    }
+  });
+}
+
+// ── Upload existing audio file ───────────────────────
+// (triggered via the attach menu's "Audio clip" option, wired above)
+
+if (audioUploader) {
+  audioUploader.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    transcribeAudioBlob(file, file.name);
+    audioUploader.value = '';
+  });
+}
+
+if (voiceStatusCancelBtn) {
+  voiceStatusCancelBtn.addEventListener('click', () => {
+    if (voiceState === VOICE_STATES.RECORDING) {
+      if (nativeRecognizing) stopNativeRecognition();
+      else stopRecording();
+    }
+    setVoiceState(VOICE_STATES.IDLE);
+  });
+}
+
+// ─── VOICE OUTPUT (TTS) — browser SpeechSynthesis only ─
+// No backend involvement: appendMessage() below attaches a "read aloud"
+// button (SVG icon) to every AI row; clicking it speaks (or stops) that
+// message's text.
+let currentUtterance = null;
+
+// Script-range checks are exact (Devanagari, Tamil, Japanese kana, etc.)
+// The handful of Latin-script languages below (fr/de/es) use a cheap
+// function-word heuristic — good enough to pick a closer voice than a
+// hardcoded "always English" default, not meant to be a real detector.
+// Falls back to 'en' whenever nothing matches confidently.
+function detectResponseLanguage(text) {
+  const sample = (text || '').slice(0, 500);
+  if (!sample.trim()) return 'en';
+
+  if (/[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]/.test(sample)) return 'ja'; // hiragana/katakana
+  if (/[\uac00-\ud7af]/.test(sample)) return 'ko';                          // hangul
+  if (/[\u0e00-\u0e7f]/.test(sample)) return 'th';                          // thai
+  if (/[\u0900-\u097f]/.test(sample)) return 'hi';                          // devanagari
+  if (/[\u0b80-\u0bff]/.test(sample)) return 'ta';                          // tamil
+  if (/[\u0600-\u06ff]/.test(sample)) return 'ar';                          // arabic
+  if (/[\u0400-\u04ff]/.test(sample)) return 'ru';                          // cyrillic
+  if (/[\u4e00-\u9fff]/.test(sample)) return 'zh';                          // han (no kana present)
+
+  const lower = sample.toLowerCase();
+  const scores = {
+    fr: (lower.match(/\b(le|la|les|des|est|une|et|vous|nous|c'est|être|avec|bonjour)\b/g) || []).length,
+    de: (lower.match(/\b(der|die|das|und|ist|nicht|ein|eine|mit|für|ich|sie)\b/g) || []).length,
+    es: (lower.match(/\b(el|la|los|las|es|una|y|que|con|para|pero|hola)\b/g) || []).length,
+  };
+  const [bestLang, bestScore] = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+  return bestScore >= 3 ? bestLang : 'en';
+}
+
+// Preferred region per detected language — used to look for an exact match
+// first before falling back to "any voice starting with this language".
+const LANGUAGE_REGION_MAP = {
+  en: 'en-US', hi: 'hi-IN', ta: 'ta-IN', ja: 'ja-JP', fr: 'fr-FR',
+  de: 'de-DE', es: 'es-ES', ar: 'ar-SA', ru: 'ru-RU', ko: 'ko-KR',
+  zh: 'zh-CN', th: 'th-TH',
+};
+
+// Returns the closest available SpeechSynthesisVoice for a detected
+// language, or null if the voice list isn't populated yet / nothing close
+// exists — callers should treat null as "let the browser pick its default".
+function pickVoiceForLanguage(langCode) {
+  const voices = window.speechSynthesis.getVoices();
+  if (!voices || !voices.length) return null;
+
+  const preferredRegion = LANGUAGE_REGION_MAP[langCode];
+  return (
+    (preferredRegion && voices.find(v => v.lang === preferredRegion)) ||
+    voices.find(v => v.lang && v.lang.toLowerCase().startsWith(langCode)) ||
+    null
+  );
+}
+
+function createTtsButton(text) {
+  if (!('speechSynthesis' in window)) return null;
+  const ttsBtn = document.createElement('button');
+  ttsBtn.classList.add('tts-btn');
+  ttsBtn.title = 'Read aloud';
+  ttsBtn.innerHTML = `
+    <svg class="tts-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M4 9.5v5h3.5L12.5 18V6L7.5 9.5H4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M16.5 9c1 1 1 5 0 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      <path d="M18.8 7c2 2.2 2 7.8 0 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>`;
+  ttsBtn.addEventListener('click', () => speakText(text, ttsBtn));
+  return ttsBtn;
+}
+
+function speakText(text, btn) {
+  if (!('speechSynthesis' in window)) return;
+
+  const isSpeakingThis = currentUtterance && btn.classList.contains('speaking');
+  window.speechSynthesis.cancel(); // stop anything currently speaking
+
+  // Only one message is ever "currently speaking" — clear every button's
+  // state before (possibly) marking a new one, so cancelling one message
+  // mid-speech can never leave a stale highlighted button behind.
+  document.querySelectorAll('.tts-btn.speaking').forEach(b => b.classList.remove('speaking'));
+
+  if (isSpeakingThis) {
+    currentUtterance = null;
+    return; // clicking again while speaking = stop only
+  }
+
+  const utterance = new SpeechSynthesisUtterance(text);
+
+  // Detect the AI response's language (not the user's browser/UI language)
+  // and pick the closest matching installed voice. Entirely client-side —
+  // no backend call, no external API.
+  const langCode = detectResponseLanguage(text);
+  const voice = pickVoiceForLanguage(langCode);
+  if (voice) {
+    utterance.voice = voice;
+    utterance.lang = voice.lang;
+  } else {
+    // No matching voice installed — set the lang hint anyway so the
+    // browser's own default voice at least attempts correct pronunciation,
+    // and gracefully fall back to its normal default otherwise.
+    utterance.lang = LANGUAGE_REGION_MAP[langCode] || 'en-US';
+  }
+
+  utterance.onend = () => { btn.classList.remove('speaking'); currentUtterance = null; };
+  utterance.onerror = () => { btn.classList.remove('speaking'); currentUtterance = null; };
+
+  currentUtterance = utterance;
+  btn.classList.add('speaking');
+  window.speechSynthesis.speak(utterance);
+}
+
 // ─── MODE TABS ────────────────────────────────────────
 if (modeTabsWrap) {
   const tabs = modeTabsWrap.querySelectorAll('.mode-tab');
+  const indicator = document.getElementById('mode-tab-indicator');
+
+  function moveIndicatorTo(tab) {
+    if (!indicator || !tab) return;
+    indicator.style.width = `${tab.offsetWidth}px`;
+    indicator.style.transform = `translateX(${tab.offsetLeft}px)`;
+  }
+
   tabs.forEach(tab => {
     tab.addEventListener('click', () => {
       tabs.forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
       currentMode = tab.dataset.value || 'flash';
+      moveIndicatorTo(tab);
     });
   });
+
+  // Position the indicator under whichever tab starts active, once layout
+  // has settled (fonts/webfont swap can shift widths right after load).
+  const placeInitialIndicator = () => {
+    const active = modeTabsWrap.querySelector('.mode-tab.active') || tabs[0];
+    moveIndicatorTo(active);
+  };
+  requestAnimationFrame(placeInitialIndicator);
+  window.addEventListener('resize', placeInitialIndicator);
 }
 
 // ─── RENDER ENGINE & UTILITIES ───────────────────────
@@ -577,6 +1018,8 @@ function appendMessage(role, text, typing = false, imageDataUrl = null, sentAt =
     content.appendChild(label);
   } else if (role === 'ai' && text) {
     content.appendChild(renderMarkdown(text));
+    const ttsBtn = createTtsButton(text);
+    if (ttsBtn) content.appendChild(ttsBtn);
   } else {
     if (imageDataUrl) {
       const imgWrap = document.createElement('div');
@@ -689,13 +1132,15 @@ async function sendMessage() {
     chatHistory.push({ role: 'assistant', content: reply });
 
     await typeText(bubble, reply, requestId);
+    const ttsBtn = createTtsButton(reply);
+    if (ttsBtn) bubble.appendChild(ttsBtn);
 
   } catch (err) {
     if (err.name === "AbortError") return;
     if (requestId !== currentRequestId) return;
     console.error(err);
     if (thinkingRow) thinkingRow.remove();
-    appendMessage('ai', '❌ Error connecting to server');
+    appendMessage('ai', 'Error connecting to server. Please try again.');
   }
 
   if (requestId === currentRequestId) {
@@ -752,6 +1197,7 @@ renderEmptyState();
 (async () => {
   await initAuthToken();
   loadSidebarHistory();
+  loadVoiceUsage();
 })();
 
 // ─── LOGOUT LOGIC ────────────────────────────────────
@@ -778,3 +1224,13 @@ if (logoutBtn) {
     }
   });
 }
+
+// ─── MODAL ACCESSIBILITY POLISH (Sprint 7.2) ───────────────────────────
+// Escape closes whichever modal-overlay is currently open — applies
+// uniformly to AI Settings, Personality, and Feedback without any of
+// those files needing to know about each other.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const openOverlay = document.querySelector('.modal-overlay.open');
+  if (openOverlay) openOverlay.classList.remove('open');
+});

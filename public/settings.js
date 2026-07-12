@@ -73,12 +73,12 @@ async function loadSettingsStatus() {
 
 function openModal() {
   clearModalError();
-  overlayEl.style.display = 'flex';
+  overlayEl.classList.add('open');
   loadSettingsStatus();
 }
 
 function closeModal() {
-  overlayEl.style.display = 'none';
+  overlayEl.classList.remove('open');
   apiKeyInput.value = '';
 }
 

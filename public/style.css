@@ -17,6 +17,10 @@
   --mono:'JetBrains Mono', ui-monospace, monospace;
   --display:'Syne', sans-serif;
   --body:'DM Sans', sans-serif;
+
+  /* ── Sprint 6.5 — single motion language used across the app ── */
+  --dur: 190ms;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 *{ box-sizing:border-box; }
@@ -105,6 +109,7 @@ body::after{
   height:100vh;
   height:100dvh;
   width:100vw;
+  transition:grid-template-columns var(--dur) var(--ease);
 }
 .shell.collapsed{ grid-template-columns:0px 1fr; }
 
@@ -116,7 +121,7 @@ body::after{
   flex-direction:column;
   min-width:0;
   overflow:hidden;
-  transition:width .18s ease, margin-left .2s ease;
+  transition:width var(--dur) var(--ease), margin-left var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
 .sidebar-top{
   padding:20px 18px 14px;
@@ -241,6 +246,8 @@ body::after{
 }
 .sidebar-foot button:hover{ color:var(--text); border-color:var(--text-dim); }
 .sidebar-foot #ai-settings-btn:hover{ color:var(--accent); border-color:var(--accent-dim); }
+.sidebar-foot #personality-btn:hover{ color:var(--accent); border-color:var(--accent-dim); }
+.sidebar-foot #feedback-btn:hover{ color:var(--accent); border-color:var(--accent-dim); }
 
 /* ── AI Settings modal (Sprint 4 — BYOK), restyled to match manifest theme ── */
 .modal-overlay{
@@ -252,6 +259,23 @@ body::after{
   align-items:center;
   justify-content:center;
   z-index:1000;
+  opacity:0;
+  visibility:hidden;
+  pointer-events:none;
+  transition:opacity var(--dur) var(--ease), visibility 0s linear var(--dur);
+}
+.modal-overlay.open{
+  opacity:1;
+  visibility:visible;
+  pointer-events:auto;
+  transition:opacity var(--dur) var(--ease), visibility 0s linear 0s;
+}
+.modal-box{
+  transform:scale(0.97) translateY(4px);
+  transition:transform var(--dur) var(--ease);
+}
+.modal-overlay.open .modal-box{
+  transform:scale(1) translateY(0);
 }
 .modal-box{
   width:min(420px, 92vw);
@@ -292,7 +316,9 @@ body::after{
   color:var(--accent);
   margin-bottom:10px;
   min-height:1em;
+  transition:opacity var(--dur) var(--ease);
 }
+.modal-status.fading{ opacity:0; }
 .modal-label{
   display:block;
   font-family:var(--mono);
@@ -313,6 +339,58 @@ body::after{
   outline:none;
 }
 .modal-input:focus{ border-color:var(--accent-dim); }
+.modal-textarea{
+  resize:vertical;
+  min-height:80px;
+  font-family:var(--body);
+  line-height:1.5;
+}
+.modal-label-optional{
+  text-transform:none;
+  letter-spacing:normal;
+  color:var(--text-faint);
+  opacity:.7;
+}
+
+/* ── personality response-style presets — single-select tile grid ── */
+.preset-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+}
+.preset-btn{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:3px;
+  font-family:var(--mono);
+  color:var(--text-dim);
+  border:1px solid var(--border-strong);
+  background:var(--bg);
+  padding:12px 8px;
+  text-align:center;
+  transition:color var(--dur) var(--ease), border-color var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+.preset-title{
+  font-size:11.5px;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+}
+.preset-desc{
+  font-family:var(--body);
+  font-size:10.5px;
+  letter-spacing:normal;
+  text-transform:none;
+  color:var(--text-faint);
+  opacity:.8;
+}
+.preset-btn:hover{ color:var(--text); border-color:var(--text-dim); }
+.preset-btn.active{
+  color:var(--accent);
+  border-color:var(--accent-dim);
+  background:rgba(0,255,102,0.07);
+}
+.preset-btn.active .preset-desc{ color:var(--accent); opacity:.65; }
 .modal-error{
   margin-top:12px;
   padding:8px 10px;
@@ -347,6 +425,8 @@ body::after{
   color:var(--text-dim);
 }
 .modal-btn-secondary:hover{ color:var(--text); border-color:var(--text-dim); }
+.modal-actions-stacked{ flex-direction:column; }
+.modal-actions-stacked .modal-btn{ width:100%; }
 
 /* ══════════════════ MAIN COLUMN ══════════════════ */
 .main{
@@ -528,8 +608,8 @@ body::after{
 
 .chat-image-wrap{ margin-bottom:10px; }
 .chat-image{
-  max-width:280px;
-  max-height:280px;
+  max-width:180px;
+  max-height:180px;
   border:1px solid var(--border-strong);
   display:block;
 }
@@ -629,6 +709,28 @@ body::after{
   line-height:1.5;
 }
 
+/* ── mode guidance note — subtle, terminal-style key underneath prompts ── */
+.mode-guide{
+  margin-top:18px;
+  padding-top:14px;
+  border-top:1px solid var(--border);
+  font-family:var(--mono);
+  font-size:10.5px;
+  letter-spacing:.02em;
+  color:var(--text-faint);
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  animation:rowIn .35s ease .1s both;
+}
+.mode-guide-item b{
+  font-family:var(--mono);
+  font-weight:600;
+  color:var(--text-dim);
+  letter-spacing:.04em;
+}
+.mode-guide-sep{ color:var(--border-strong); }
+
 /* ── input area ── */
 .input-area{
   padding:14px 30px 22px;
@@ -640,6 +742,7 @@ body::after{
   display:flex;
   gap:22px;
   margin-bottom:10px;
+  position:relative;
 }
 .mode-tab{
   font-family:var(--display);
@@ -650,9 +753,23 @@ body::after{
   color:var(--text-faint);
   padding-bottom:8px;
   border-bottom:2px solid transparent;
+  transition:color var(--dur) var(--ease);
 }
 .mode-tab:hover{ color:var(--text-dim); }
-.mode-tab.active{ color:var(--accent); border-bottom-color:var(--accent); }
+.mode-tab.active{ color:var(--accent); }
+
+/* gliding underline — a single element that slides/resizes between tabs
+   instead of each tab's own border flipping on instantly */
+.mode-tab-indicator{
+  position:absolute;
+  bottom:0;
+  left:0;
+  height:2px;
+  background:var(--accent);
+  transform:translateX(0);
+  transition:transform var(--dur) var(--ease), width var(--dur) var(--ease);
+  pointer-events:none;
+}
 
 .input-box{
   border:1px solid var(--border-strong);
@@ -735,8 +852,23 @@ body::after{
 }
 
 /* ── mobile overlay ── */
-.overlay{ display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:35; }
-.overlay.visible{ display:block; }
+.overlay{
+  display:block;
+  position:fixed;
+  inset:0;
+  background:rgba(0,0,0,0.5);
+  z-index:35;
+  opacity:0;
+  visibility:hidden;
+  pointer-events:none;
+  transition:opacity var(--dur) var(--ease), visibility 0s linear var(--dur);
+}
+.overlay.visible{
+  opacity:1;
+  visibility:visible;
+  pointer-events:auto;
+  transition:opacity var(--dur) var(--ease), visibility 0s linear 0s;
+}
 
 @media (max-width: 768px){
   .shell{ grid-template-columns:1fr; }
@@ -746,7 +878,7 @@ body::after{
     width:260px;
     z-index:40;
     transform:translateX(-100%);
-    transition:transform .28s cubic-bezier(0.4,0,0.2,1);
+    transition:transform var(--dur) var(--ease);
   }
   .sidebar.mobile-open{ transform:translateX(0); }
   .menu-btn.mobile-only{ display:inline-block; }
@@ -770,6 +902,7 @@ body::after{
   .empty-sub{ font-size:13px; margin-bottom:16px; }
   .prompt-item{ padding:11px 2px; gap:10px; }
   .prompt-text{ font-size:13.5px; }
+  .mode-guide{ font-size:10px; gap:6px 8px; margin-top:14px; padding-top:12px; }
 
   .input-area{ padding:10px 12px 16px; width:100%; }
   .input-inner{ width:100%; min-width:0; }
@@ -783,9 +916,251 @@ body::after{
   .send-btn{ font-size:10.5px; padding:9px 12px; flex-shrink:0; }
 
   .input-hint{ display:none; }
+
+  /* attach menu — keep inside viewport, comfortable tap targets */
+  .attach-menu{ min-width:170px; }
+  .attach-menu-item{ padding:12px 14px; font-size:13.5px; }
+
+  /* voice status bar — tighter on small screens, text can wrap instead of overflow */
+  .voice-status-bar{ font-size:11px; padding:8px 10px; }
+  .voice-status-text{ overflow-wrap:anywhere; }
+
+  /* chat image previews — scale down relative to narrow viewport */
+  .chat-image{ max-width:min(180px, 55vw); max-height:min(180px, 55vw); }
+
+  /* AI settings modal — avoid squeezed side-by-side buttons on small screens */
+  .modal-box{ padding:18px; }
+  .modal-actions{ flex-direction:column-reverse; gap:8px; }
+  .modal-actions .modal-btn{ width:100%; text-align:center; }
+}
+
+@media (max-width: 420px){
+  .mode-guide{ flex-direction:column; gap:5px; }
+  .mode-guide-sep{ display:none; }
 }
 
 @media (max-width: 380px){
   .wordmark{ font-size:16px; }
   .status-label{ display:none; }
+}
+/* ═══════════════ VOICE INPUT / OUTPUT (Sprint — Voice) ═══════════════
+   Additive only — reuses existing CSS vars, mirrors .attach-btn sizing. */
+
+.mic-btn{
+  font-family:var(--mono);
+  font-size:16px;
+  color:var(--text-faint);
+  padding:8px 6px;
+  line-height:1;
+  flex-shrink:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  transition:color var(--dur) var(--ease), opacity var(--dur) var(--ease);
+}
+.mic-btn:hover{ color:var(--text-dim); }
+.mic-btn.recording{ color:var(--danger); animation:mic-pulse 1.2s ease-in-out infinite; }
+.mic-btn:disabled{ opacity:.4; cursor:default; }
+.mic-btn .mic-icon line{ transition:height var(--dur) var(--ease); }
+.mic-btn.recording .mic-icon line:nth-child(1){ animation:mic-bar 0.9s ease-in-out infinite; }
+.mic-btn.recording .mic-icon line:nth-child(2){ animation:mic-bar 0.9s ease-in-out infinite .1s; }
+.mic-btn.recording .mic-icon line:nth-child(3){ animation:mic-bar 0.9s ease-in-out infinite .2s; }
+.mic-btn.recording .mic-icon line:nth-child(4){ animation:mic-bar 0.9s ease-in-out infinite .1s; }
+.mic-btn.recording .mic-icon line:nth-child(5){ animation:mic-bar 0.9s ease-in-out infinite; }
+@keyframes mic-bar{
+  0%, 100%{ transform:scaleY(0.6); }
+  50%{ transform:scaleY(1.3); }
+}
+.mic-btn .mic-icon line{ transform-origin:center; transform-box:fill-box; }
+
+.attach-menu-wrap{ position:relative; flex-shrink:0; }
+.attach-menu{
+  position:absolute;
+  bottom:calc(100% + 8px);
+  left:0;
+  display:flex;
+  flex-direction:column;
+  min-width:150px;
+  border:1px solid var(--border-strong);
+  background:var(--surface);
+  box-shadow:0 8px 24px rgba(0,0,0,0.4);
+  z-index:20;
+  opacity:0;
+  visibility:hidden;
+  transform:translateY(6px);
+  pointer-events:none;
+  transition:opacity var(--dur) var(--ease), transform var(--dur) var(--ease), visibility 0s linear var(--dur);
+  transform-origin:bottom left;
+}
+.attach-menu.open{
+  opacity:1;
+  visibility:visible;
+  transform:translateY(0);
+  pointer-events:auto;
+  transition:opacity var(--dur) var(--ease), transform var(--dur) var(--ease), visibility 0s linear 0s;
+}
+.attach-menu-item{
+  font-family:var(--body);
+  font-size:13px;
+  color:var(--text-dim);
+  text-align:left;
+  padding:10px 14px;
+  white-space:nowrap;
+  display:flex;
+  align-items:center;
+  gap:10px;
+  transition:background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.attach-menu-item:hover{ background:var(--surface-2); color:var(--text); }
+.menu-icon{
+  width:16px;
+  height:16px;
+  flex-shrink:0;
+  color:var(--text-faint);
+  transition:color var(--dur) var(--ease);
+}
+.attach-menu-item:hover .menu-icon{ color:var(--accent); }
+
+.mic-icon{
+  width:16px;
+  height:16px;
+  display:block;
+}
+
+@keyframes mic-pulse{
+  0%, 100%{ opacity:1; }
+  50%{ opacity:.4; }
+}
+
+.voice-status-bar{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  border:1px solid var(--border-strong);
+  background:var(--surface);
+  font-family:var(--mono);
+  font-size:12px;
+  letter-spacing:.03em;
+  color:var(--text-dim);
+  opacity:0;
+  transform:translateY(-6px);
+  max-height:0;
+  margin-bottom:0;
+  padding:0 12px;
+  overflow:hidden;
+  pointer-events:none;
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease),
+    max-height var(--dur) var(--ease),
+    margin-bottom var(--dur) var(--ease),
+    padding var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+.voice-status-bar.visible{
+  opacity:1;
+  transform:translateY(0);
+  max-height:60px;
+  margin-bottom:8px;
+  padding:8px 12px;
+  pointer-events:auto;
+}
+.voice-status-bar.error{ border-color:var(--danger); color:var(--danger); }
+.voice-status-cancel-btn{
+  color:var(--text-faint);
+  font-size:13px;
+  line-height:1;
+  flex-shrink:0;
+  transition:color var(--dur) var(--ease);
+}
+.voice-status-cancel-btn:hover{ color:var(--danger); }
+
+.voice-usage-indicator{
+  float:right;
+  color:var(--text-faint);
+}
+.voice-usage-indicator.low{ color:var(--danger); }
+
+.tts-btn{
+  font-family:var(--mono);
+  font-size:13px;
+  color:var(--text-faint);
+  padding:2px 6px;
+  margin-left:8px;
+  line-height:1;
+  vertical-align:middle;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+}
+.tts-btn:hover{ color:var(--text-dim); }
+.tts-btn.speaking{ color:var(--accent); }
+.tts-icon{ width:15px; height:15px; display:block; }
+.tts-btn.speaking .tts-icon path:nth-child(2){ animation:tts-wave 1s ease-in-out infinite; transform-origin:center; }
+.tts-btn.speaking .tts-icon path:nth-child(3){ animation:tts-wave 1s ease-in-out infinite .15s; transform-origin:center; }
+@keyframes tts-wave{
+  0%, 100%{ opacity:1; }
+  50%{ opacity:.35; }
+}
+
+@media (max-width: 480px){
+  .mic-btn{ padding:6px 4px; font-size:15px; }
+  .voice-status-bar{ font-size:11px; }
+}
+
+/* ═══════════════ SPRINT 6.5 — MOTION POLISH ═══════════════
+   Single motion language: var(--dur) ≈ 190ms, var(--ease) everywhere.
+   Sidebar, mode-tab indicator, voice status, attach menu, and the modal
+   are now driven by CSS classes (added/removed in JS) instead of raw
+   style.display swaps, so both the open AND close motion can animate —
+   display:none can't be transitioned, classes can. No layout/structural
+   changes; this only changes how visibility is toggled and adds motion. */
+
+/* ── general hover/focus smoothing across interactive elements ── */
+.new-session-btn,
+.sidebar-foot button,
+.menu-btn,
+.history-item,
+.session-actions button,
+.attach-btn,
+.send-btn,
+.prompt-item,
+.prompt-index,
+.prompt-text,
+.attachment-chip button,
+.modal-close-btn,
+.modal-btn,
+.tts-btn,
+.copy-btn,
+.history-item.active{
+  transition:color var(--dur) var(--ease), background-color var(--dur) var(--ease), border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+
+/* ── subtle press feedback — a light tap-down, not a bounce ── */
+.new-session-btn:active,
+.sidebar-foot button:active,
+.menu-btn:active,
+.attach-btn:active,
+.mic-btn:active,
+.send-btn:active:not(:disabled),
+.prompt-item:active,
+.mode-tab:active,
+.attach-menu-item:active,
+.preset-btn:active,
+.modal-btn:active,
+.tts-btn:active,
+.copy-btn:active{
+  transform:scale(0.97);
+}
+
+/* ── history item active indicator — smooth highlight shift ── */
+.history-item{
+  transition:background-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+
+/* ── attachment preview chip — gentle entrance when an image is attached ── */
+.attachment-preview.show{
+  animation:rowIn var(--dur) var(--ease);
 }
