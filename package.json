@@ -17,6 +17,7 @@
     "express": "^5.2.1",
     "express-rate-limit": "^7.4.1",
     "groq-sdk": "^1.2.1",
-    "helmet": "^8.0.0"
+    "helmet": "^8.0.0",
+    "multer": "^2.2.0"
   }
 }
