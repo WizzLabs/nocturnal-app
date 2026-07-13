@@ -9,6 +9,11 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import crypto from 'crypto';
+import { planMessage } from './lib/planner.js';
+import { matchLocalTool } from './lib/localTools.js';
+import { getSearchProvider } from './lib/search/index.js';
+import { getCached, setCached } from './lib/search/cache.js';
+import { formatSearchContext } from './lib/search/formatContext.js';
 
 dotenv.config();
 
@@ -93,7 +98,22 @@ async function requireAuth(req, res, next) {
   try {
     const { data: { user }, error } = await supabase.auth.getUser(token);
     if (error || !user) return res.status(401).json({ error: 'Invalid or expired session.' });
+
+    // Sprint 8.3 — Email verification gate. Unverified accounts can hold a
+    // valid session token (sign-up succeeds before confirmation) but must
+    // not be able to use the app itself. email_confirmed_at is populated by
+    // Supabase Auth the moment the confirmation link is clicked (or
+    // immediately at sign-up if email confirmations are disabled project-
+    // wide), so this check is safe either way.
+    if (!user.email_confirmed_at) {
+      return res.status(403).json({
+        error: 'Please verify your email before using Nocturnal. Check your inbox for the confirmation link.',
+        code: 'EMAIL_NOT_VERIFIED',
+      });
+    }
+
     req.userId = user.id;
+    req.userEmail = user.email;
     next();
   } catch (err) {
     console.error('Auth verification failure:', err);
@@ -146,7 +166,16 @@ const MODELS = {
   abyss:   "qwen/qwen3-32b",
 };
 
-// ─── AUTO ROUTER KEYWORD ENGINE ───────────────────────
+// Model used for the capability planner (see lib/planner.js). Reuses the
+// flash model since it's already the fastest/cheapest option available —
+// no need for a separate provider just for a small classification call.
+const PLANNER_MODEL = MODELS.flash;
+
+// ─── AUTO ROUTER KEYWORD ENGINE (MODEL TIER ONLY) ─────
+// NOTE: this selects which MODEL TIER answers (flash/insight/abyss) — it is
+// entirely separate from the capability planner (lib/planner.js), which
+// decides WHETHER live search is needed. The two run independently; a
+// search-augmented question can still land on any tier.
 function autoSelectMode(msg) {
   const m = msg.toLowerCase();
 
@@ -175,10 +204,13 @@ function autoSelectMode(msg) {
 // ─── MODE INSTRUCTIONS ───────────────────────────────
 const modeInstructions = {
   flash: `
-- Give very short, direct answers (1-3 lines max)
-- No unnecessary explanation
-- Be conversational and snappy
-- Do NOT use markdown formatting like **bold** or bullet points
+- Be fast, warm, and helpful. Keep replies concise, but never terse to the point of feeling dismissive or nonchalant.
+- For simple greetings or small talk, respond naturally and briefly (e.g. "Hey! What can I help you with today?") — no self-introductions, no robotic stock phrases.
+- For general questions, answer directly in 1-4 short lines. Prefer short paragraphs over walls of text; use a brief bullet list only when it genuinely helps.
+- For programming/coding questions: give the code first in a properly formatted triple-backtick code block, then a short explanation underneath (1-3 lines). Mention time/space complexity only when it's actually useful. No long essays.
+- Do NOT use **bold**, headers, or other markdown styling — plain text and bullet points ("- ") are fine, and triple-backtick code blocks are always fine.
+- If you don't know something, or it needs current/live information you don't have, say so plainly and naturally (e.g. "I don't have reliable information about that" or "I'm not certain — that may need a quick search"). Never guess or invent facts, and never sound dismissive or overconfident.
+- Personality: calm, helpful, a little witty when it naturally fits — never sarcastic, dismissive, or over-the-top with jokes.
 `,
   insight: `
 - Give balanced, clear responses
@@ -426,6 +458,31 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
 
   let timedOut = false;
 
+  // Sprint 8.5.1 — LOCAL TOOLS: requests like "what time is it" or "what's
+  // today's date" don't need the planner, a search provider, or the LLM at
+  // all. Checked first, before mode selection/planner, and skipped when an
+  // image is attached (that path is already deterministic — vision, not a
+  // local tool). Consumes zero search credits, zero planner calls, zero AI
+  // tokens. Still persisted to chat_logs like any other turn so history/
+  // continuity behave the same as a normal reply.
+  if (!image) {
+    const localMatch = matchLocalTool(message);
+    if (localMatch) {
+      console.log(`[LocalTool] ${localMatch.name}`);
+      const localSelectedMode = mode === 'auto' ? 'flash' : (MODELS[mode] ? mode : 'flash');
+      if (sessionId) {
+        saveConversationToDatabase(sessionId, message, localMatch.reply, localSelectedMode, image, req.userId)
+          .catch(dbErr => console.error("Database storage tracking failure:", dbErr));
+      }
+      return res.json({
+        reply: localMatch.reply,
+        mode: localSelectedMode,
+        usedSearch: false,
+        sources: [],
+      });
+    }
+  }
+
   try {
     // FIX: If an image is attached, always force flash (the only vision-capable model).
     // This prevents auto-routing from picking insight/abyss and silently dropping the image.
@@ -443,26 +500,124 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
     const defaultModel = MODELS[selectedMode];
     const modeInstruction = modeInstructions[selectedMode];
 
+    // Sprint 8 — CAPABILITY PLANNER: decides whether this message needs
+    // live web information. Skipped entirely when an image is attached
+    // (that path is already deterministic — vision, not search). Always
+    // runs on the shared default Groq client, never a user's BYOK client,
+    // so planner cost/behavior stays predictable regardless of BYOK state.
+    // Fails closed to CHAT on any error — see lib/planner.js.
+    let searchContextBlock = null;
+    // Sprint 8.2: sources kept alongside the context block so the frontend
+    // can render an expandable "Sources" list without re-parsing the raw
+    // prompt block. searchFailed tracks a planned-but-failed search so the
+    // model can acknowledge it naturally instead of silently going quiet.
+    let searchSources = [];
+    let searchFailed = false;
+    // Sprint 8.5: the planner can also return CLARIFY for requests that are
+    // real-world/current but too broad to search usefully. clarifyQuestion
+    // is threaded into the system prompt below (same pattern as
+    // searchContextSection) so the main model asks it naturally instead of
+    // guessing a search or answering too broadly — no separate turn, no
+    // change to the request/response shape.
+    let clarifyQuestion = null;
+    // Sprint 8.5.1: computed fresh per request (never hardcoded) and treated
+    // as the single source of truth for "today" — threaded into both the
+    // planner (so relative expressions like "this year" resolve into a
+    // concrete, current-year search query) and the main system prompt below
+    // (so the model never second-guesses it against its own training data).
+    const currentDate = new Date();
+    const currentDateString = currentDate.toLocaleDateString('en-US', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+
+    if (!image) {
+      const plan = await planMessage({
+        groqClient: groq,
+        plannerModel: PLANNER_MODEL,
+        message,
+        history,
+        currentDateString,
+      });
+
+      if (plan.route === 'CLARIFY') {
+        clarifyQuestion = plan.clarify;
+        if (process.env.NODE_ENV !== 'production') {
+          console.log(`[Planner] clarify: "${plan.clarify}"`);
+        }
+      } else if (plan.route === 'SEARCH') {
+        if (process.env.NODE_ENV !== 'production') {
+          console.log(`[Planner] query: "${plan.query}" (category: ${plan.category})`);
+        }
+        try {
+          let results = getCached(plan.query, plan.category);
+          if (results) {
+            console.log('[Cache] HIT');
+          } else {
+            console.log('[Cache] MISS');
+            const provider = getSearchProvider();
+            try {
+              console.log(`[Search] ${provider.name}`);
+              results = await provider.search(plan.query, { category: plan.category });
+            } catch (providerErr) {
+              console.log('[Search] Fallback');
+              throw providerErr; // no secondary provider configured yet — surfaces to outer catch
+            }
+            setCached(plan.query, results, plan.category);
+          }
+          searchContextBlock = formatSearchContext(results, plan.query);
+          searchSources = Array.isArray(results)
+            ? results.filter(r => r?.url && r?.title).map(r => ({ title: r.title, url: r.url }))
+            : [];
+        } catch (searchErr) {
+          // A failed/misconfigured search provider must never break chat —
+          // fall through with no injected context, same as a CHAT route.
+          console.warn('Search step failed, proceeding without live context:', searchErr.message);
+          searchFailed = true;
+        }
+      }
+    }
+
     // Sprint 7: server-side-only personality lookup — never from req.body.
     const userPersonality = await getUserPersonality(req.userId);
     const personalitySection = buildPersonalitySection(userPersonality);
 
+    const searchContextSection = searchContextBlock
+      ? `\nYou have live web search results below. These are MORE CURRENT than your training data — if they conflict with what you already "know," the search results are correct and your training-data assumption is outdated. Trust them over your own prior knowledge for anything time-sensitive (current holders of a position, current date, current events, prices, scores). Weave the information into a natural answer, the way a knowledgeable person would just tell you the answer.\n\nDo NOT say things like "according to my search results", "based on my search", "I looked this up", or otherwise narrate that you searched — just answer naturally. Only mention that you checked live/current sources if: the user explicitly asked for sources/where this is from, you're genuinely unsure or the sources are thin, or the sources meaningfully disagree with each other. If the results don't actually answer the question, say so honestly rather than guessing.\n\n${searchContextBlock}\n`
+      : searchFailed
+        ? `\nYou attempted to look up live/current information for this but the search failed. Don't expose any technical/error detail. Briefly and naturally let the user know you couldn't verify it live right now and are answering from existing knowledge, which may not reflect the latest updates — then answer as best you can.\n`
+        : '';
+
+    // Sprint 8.5: when the planner routes CLARIFY, the request is too broad
+    // to search well. Rather than guessing, ask the suggested question (in
+    // your own words if you like) instead of attempting a full answer.
+    const clarifyContextSection = clarifyQuestion
+      ? `\nThis request is too broad to answer well or look up as-is. Instead of guessing an answer, briefly and naturally ask the user a short clarifying question to narrow it down before answering. A reasonable question here would be something like: "${clarifyQuestion}" — feel free to phrase it your own way. Don't apologize or over-explain, just ask naturally.\n`
+      : '';
+
     // Assemble Custom Runtime Instructions
     const systemPrompt = `You are Nocturnal, a smart and human-like AI assistant.
 
+Today's date is ${currentDateString}. This is injected fresh from the server clock and is always authoritative — trust it completely over any date, year, or "current" event you believe you know from training. Never say this date is "in the future" or otherwise question it. Resolve relative expressions like "today", "yesterday", "tomorrow", "this week", "this month", "this year", "current", and "latest" against this exact date.
+
 Behavior:
 ${modeInstruction}
-${personalitySection}
+${personalitySection}${searchContextSection}${clarifyContextSection}
 Rules:
 - Speak naturally like a human, not a corporate assistant
 - Never say things like "Certainly!", "Of course!", "Great question!"
 - Do NOT use **bold**, *italic*, or # headers in your responses
 - Only use markdown for code blocks with triple backticks
 - Adapt your tone to match the user's energy
-- Only identify yourself as "Nocturnal" when the user explicitly asks who you are, what your name is, who built or created you, or asks for an introduction — never introduce yourself in normal conversation
+- In normal conversation, introduce yourself only as "Nocturnal" — do not mention who created you unless explicitly asked
 - If the user explicitly asks who created, designed, engineered, or built you, answer that you were designed and engineered by Wizz
 - If the user asks a genuine technical question about your underlying model, API, or provider, answer honestly and do not hide implementation details
-- Do not volunteer technical implementation details (models, APIs, providers) unless the user specifically asks about them`;
+- Do not volunteer technical implementation details (models, APIs, providers) unless the user specifically asks about them
+- Never use robotic phrases like "According to my search results" or "Based on my search" — speak like you just know the answer
+- Questions about your own identity, creator, name, modes, personality, or features are things you already know — answer them directly and confidently from this system prompt, never by claiming to search or look them up
+- If asked what you know about the user or this conversation, answer only from what's actually been said in this session — don't claim persistent memory across conversations unless that's actually true, and say so plainly if you don't have any context on them yet`;
 
     let messagesPayload = [
       { role: "system", content: systemPrompt }
@@ -564,7 +719,12 @@ Rules:
     }
 
     if (!res.headersSent) {
-      return res.json({ reply, mode: selectedMode });
+      return res.json({
+        reply,
+        mode: selectedMode,
+        usedSearch: !!searchContextBlock,
+        sources: searchContextBlock ? searchSources : [],
+      });
     }
 
   } catch (err) {
@@ -999,6 +1159,37 @@ app.delete('/api/personality', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Failed to remove personality settings:', err);
     return res.status(500).json({ error: 'Could not remove personality settings.' });
+  }
+});
+
+// ─── ENDPOINT: DELETE ACCOUNT (Sprint 8.3) ────────────────────
+// Permanently and irreversibly deletes every row this user owns, then the
+// Supabase Auth account itself. Order matters: application tables first
+// (chat_logs FKs reference auth.users(id) without ON DELETE CASCADE, so a
+// leftover row would make the admin.deleteUser call fail), auth user last.
+// Uses the service-role client already initialized above — never exposed
+// to the browser.
+app.delete('/api/account', requireAuth, async (req, res) => {
+  const userId = req.userId;
+
+  try {
+    const tableDeletes = await Promise.all([
+      supabase.from('chat_logs').delete().eq('user_id', userId),
+      supabase.from('voice_usage').delete().eq('user_id', userId),
+      supabase.from('user_ai_settings').delete().eq('user_id', userId),
+      supabase.from('user_personality').delete().eq('user_id', userId),
+    ]);
+
+    const tableError = tableDeletes.find((r) => r.error);
+    if (tableError) throw tableError.error;
+
+    const { error: authDeleteError } = await supabase.auth.admin.deleteUser(userId);
+    if (authDeleteError) throw authDeleteError;
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error(`Account deletion failed for user ${userId}:`, err);
+    return res.status(500).json({ error: 'Could not delete your account. Please try again or contact support.' });
   }
 });
 
