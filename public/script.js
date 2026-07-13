@@ -994,7 +994,56 @@ function tagFor(role) {
   return role === 'ai' ? 'NOCTURNAL_01' : 'YOU';
 }
 
-function appendMessage(role, text, typing = false, imageDataUrl = null, sentAt = null) {
+// Sprint 8.2 — subtle "LIVE" badge shown above assistant messages that
+// used live web search. Purely presentational, only rendered when the
+// caller explicitly passes usedSearch === true.
+function createLiveBadge() {
+  const badge = document.createElement('div');
+  badge.classList.add('live-badge');
+  badge.innerHTML = `<span class="live-dot"></span>LIVE`;
+  return badge;
+}
+
+// Sprint 8.2 — compact expandable "Sources" list below a search-grounded
+// assistant message. Collapsed by default; clicking reveals article
+// titles linking out to their original URLs. No-ops if there are no
+// sources to show.
+function createSourcesBlock(sources) {
+  if (!Array.isArray(sources) || sources.length === 0) return null;
+
+  const wrap = document.createElement('div');
+  wrap.classList.add('sources-wrap');
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.classList.add('sources-btn');
+  toggle.textContent = `Sources (${sources.length})`;
+
+  const list = document.createElement('div');
+  list.classList.add('sources-list');
+  list.hidden = true;
+
+  sources.forEach(src => {
+    const link = document.createElement('a');
+    link.classList.add('source-link');
+    link.href = src.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = src.title || src.url;
+    list.appendChild(link);
+  });
+
+  toggle.addEventListener('click', () => {
+    list.hidden = !list.hidden;
+    toggle.classList.toggle('open', !list.hidden);
+  });
+
+  wrap.appendChild(toggle);
+  wrap.appendChild(list);
+  return wrap;
+}
+
+function appendMessage(role, text, typing = false, imageDataUrl = null, sentAt = null, usedSearch = false, sources = []) {
   const row = document.createElement('div');
   row.classList.add('row', role === 'ai' ? 'ai' : 'user');
   if (typing) row.classList.add('thinking');
@@ -1017,9 +1066,12 @@ function appendMessage(role, text, typing = false, imageDataUrl = null, sentAt =
     label.textContent = 'processing…';
     content.appendChild(label);
   } else if (role === 'ai' && text) {
+    if (usedSearch) row.appendChild(createLiveBadge());
     content.appendChild(renderMarkdown(text));
     const ttsBtn = createTtsButton(text);
     if (ttsBtn) content.appendChild(ttsBtn);
+    const sourcesBlock = createSourcesBlock(sources);
+    if (sourcesBlock) content.appendChild(sourcesBlock);
   } else {
     if (imageDataUrl) {
       const imgWrap = document.createElement('div');
@@ -1125,15 +1177,20 @@ async function sendMessage() {
     if (requestId !== currentRequestId) return;
 
     const reply = data.reply || "No response";
+    const usedSearch = !!data.usedSearch;
+    const sources = Array.isArray(data.sources) ? data.sources : [];
 
     if (thinkingRow) { thinkingRow.remove(); thinkingRow = null; }
 
-    const { bubble } = appendMessage('ai', '');
+    const { row, bubble } = appendMessage('ai', '');
+    if (usedSearch) row.insertBefore(createLiveBadge(), row.firstChild);
     chatHistory.push({ role: 'assistant', content: reply });
 
     await typeText(bubble, reply, requestId);
     const ttsBtn = createTtsButton(reply);
     if (ttsBtn) bubble.appendChild(ttsBtn);
+    const sourcesBlock = createSourcesBlock(sources);
+    if (sourcesBlock) bubble.appendChild(sourcesBlock);
 
   } catch (err) {
     if (err.name === "AbortError") return;

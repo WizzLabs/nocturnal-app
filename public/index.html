@@ -14,8 +14,14 @@
   <!-- ── AUTH GUARD ──────────────────────────────────────────────────────
        Extracted to auth-guard.js (Sprint 3) so CSP can enforce
        script-src 'self' without an 'unsafe-inline' exception. Logic is
-       unchanged — see that file for the full explanation. ──────────────── -->
-  
+       unchanged — see that file for the full explanation.
+
+       Sprint 8.3 fix: this file existed but was never actually loaded by
+       any <script> tag, so the redirect it implements never ran and this
+       page's shell would render for signed-out visitors before any API
+       call failed. Loaded here, synchronously, before anything else in
+       <head> or <body>, so it can redirect before the shell paints. ──── -->
+  <script src="auth-guard.js"></script>
 </head>
 <body>
 
@@ -42,6 +48,7 @@
       <button id="personality-btn" title="Personality">[ PERSONALITY ]</button>
       <button id="ai-settings-btn" title="AI Settings">[ AI SETTINGS ]</button>
       <button id="feedback-btn" title="Feedback">[ FEEDBACK ]</button>
+      <button id="account-btn" title="Account">[ ACCOUNT ]</button>
       <button id="logout-btn" title="Logout">[ LOGOUT ]</button>
     </div>
   </aside>
@@ -138,6 +145,34 @@
       <div class="modal-actions modal-actions-stacked">
         <button type="button" id="feedback-report-btn" class="modal-btn modal-btn-primary">Report Feedback</button>
         <button type="button" id="feedback-portfolio-btn" class="modal-btn modal-btn-secondary">Meet Creator</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── ACCOUNT MODAL (Sprint 8.3) — account deletion lives here, separate
+       from AI Settings (BYOK) and Personality ── -->
+  <div id="account-overlay" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span>Account</span>
+        <button id="account-close-btn" class="modal-close-btn" title="Close">&times;</button>
+      </div>
+
+      <p class="modal-subtext">
+        Permanently delete your Nocturnal account. This removes your chat history,
+        sessions, AI settings, personality settings, stored API keys, and voice
+        usage data. This action is irreversible.
+      </p>
+
+      <label class="modal-label" for="account-delete-confirm-input">
+        Type <strong>DELETE</strong> to confirm
+      </label>
+      <input id="account-delete-confirm-input" class="modal-input" type="text" autocomplete="off" placeholder="DELETE" />
+
+      <div id="account-error" class="modal-error" style="display:none;"></div>
+
+      <div class="modal-actions">
+        <button id="account-delete-btn" class="modal-btn modal-btn-danger" disabled>Delete Account</button>
       </div>
     </div>
   </div>
@@ -265,5 +300,6 @@
 <script src="settings.js"></script>
 <script src="personality.js"></script>
 <script src="feedback.js"></script>
+<script src="account.js"></script>
 </body>
 </html>

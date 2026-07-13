@@ -248,6 +248,7 @@ body::after{
 .sidebar-foot #ai-settings-btn:hover{ color:var(--accent); border-color:var(--accent-dim); }
 .sidebar-foot #personality-btn:hover{ color:var(--accent); border-color:var(--accent-dim); }
 .sidebar-foot #feedback-btn:hover{ color:var(--accent); border-color:var(--accent-dim); }
+.sidebar-foot #account-btn:hover{ color:var(--danger); border-color:rgba(224,97,107,0.35); }
 
 /* ── AI Settings modal (Sprint 4 — BYOK), restyled to match manifest theme ── */
 .modal-overlay{
@@ -425,6 +426,14 @@ body::after{
   color:var(--text-dim);
 }
 .modal-btn-secondary:hover{ color:var(--text); border-color:var(--text-dim); }
+.modal-btn-danger{
+  background:transparent;
+  border:1px solid var(--danger);
+  color:var(--danger);
+  width:100%;
+}
+.modal-btn-danger:hover:not(:disabled){ background:var(--danger); color:var(--bg); }
+.modal-btn-danger:disabled{ opacity:0.45; cursor:default; }
 .modal-actions-stacked{ flex-direction:column; }
 .modal-actions-stacked .modal-btn{ width:100%; }
 
@@ -1082,6 +1091,74 @@ body::after{
   color:var(--text-faint);
 }
 .voice-usage-indicator.low{ color:var(--danger); }
+
+/* ── Sprint 8.2 — live search badge ── */
+.live-badge{
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  font-family:var(--mono);
+  font-size:10px;
+  font-weight:600;
+  letter-spacing:.12em;
+  color:var(--accent);
+  border:1px solid var(--accent-dim);
+  background:var(--accent-soft);
+  padding:2px 7px;
+  margin-bottom:6px;
+  border-radius:2px;
+  width:fit-content;
+}
+.live-dot{
+  width:6px;
+  height:6px;
+  border-radius:50%;
+  background:var(--accent);
+  box-shadow:0 0 6px var(--accent);
+  animation:live-pulse 1.6s ease-in-out infinite;
+}
+@keyframes live-pulse{
+  0%, 100%{ opacity:1; }
+  50%{ opacity:.35; }
+}
+
+/* ── Sprint 8.2 — expandable sources ── */
+.sources-wrap{
+  margin-top:10px;
+}
+.sources-btn{
+  font-family:var(--mono);
+  font-size:11px;
+  letter-spacing:.04em;
+  color:var(--text-faint);
+  background:transparent;
+  border:1px solid var(--accent-dim);
+  padding:3px 8px;
+  border-radius:2px;
+  cursor:pointer;
+}
+.sources-btn:hover, .sources-btn.open{
+  color:var(--accent);
+  background:var(--accent-soft);
+}
+.sources-list{
+  display:flex;
+  flex-direction:column;
+  gap:5px;
+  margin-top:8px;
+  padding-left:10px;
+  border-left:1px solid var(--accent-dim);
+}
+.source-link{
+  font-family:var(--mono);
+  font-size:12px;
+  color:var(--text-dim);
+  text-decoration:none;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.source-link:hover{ color:var(--accent); text-decoration:underline; }
 
 .tts-btn{
   font-family:var(--mono);
