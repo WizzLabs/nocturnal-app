@@ -15,7 +15,7 @@ A full-stack, self-hosted AI chat application with per-user authentication, isol
 
 ---
 
-## 🚀 What's New in v2.0.0 Beta
+## 🚀 What's New in v2.0.0
 
 Nocturnal can now tell when it needs to *know* something versus when it needs to *look something up* — and it handles the trivial stuff without spending a model call at all.
 
