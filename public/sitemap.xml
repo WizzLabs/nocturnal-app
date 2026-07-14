@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://nocturnal-app.onrender.com/</loc>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://nocturnal-app.onrender.com/auth.html</loc>
+  </url>
+  <url>
+    <loc>https://nocturnal-app.onrender.com/reset-password.html</loc>
+  </url>
+</urlset>
