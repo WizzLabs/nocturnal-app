@@ -140,12 +140,47 @@
       </div>
 
       <p class="modal-subtext">
-        Report an issue, share a suggestion, or check out what else the creator's been building.
+        Report an issue, share a suggestion, or meet the team behind it.
       </p>
 
       <div class="modal-actions modal-actions-stacked">
         <button type="button" id="feedback-report-btn" class="modal-btn modal-btn-primary">Report Feedback</button>
-        <button type="button" id="feedback-portfolio-btn" class="modal-btn modal-btn-secondary">Meet Creator</button>
+        <button type="button" id="feedback-portfolio-btn" class="modal-btn modal-btn-secondary">Meet the Team</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MEET THE TEAM MODAL — opened from the Feedback modal, two member cards ── -->
+  <div id="team-overlay" class="modal-overlay">
+    <div class="modal-box team-modal-box">
+      <div class="modal-header">
+        <span>Meet the Team</span>
+        <button id="team-close-btn" class="modal-close-btn" title="Close">&times;</button>
+      </div>
+
+      <div class="team-grid">
+        <div class="team-card">
+          <div class="team-card-name">Jithin Rishi <span class="team-card-alias">(Wizz)</span></div>
+          <div class="team-card-role">Founder &amp; Project Creator</div>
+          <ul class="team-card-list">
+            <li>Product Design &amp; Development</li>
+            <li>AI Integration &amp; Implementation</li>
+            <li>Interface Design</li>
+            <li>Testing &amp; Deployment</li>
+          </ul>
+          <button type="button" id="team-member1-btn" class="modal-btn modal-btn-secondary team-card-btn">Portfolio</button>
+        </div>
+
+        <div class="team-card">
+          <div class="team-card-name">Sharuux <span class="team-card-alias">(SHARUUX)</span></div>
+          <div class="team-card-role">Research &amp; Product Support</div>
+          <ul class="team-card-list">
+            <li>Product Research</li>
+            <li>User Testing &amp; Feedback</li>
+            <li>Feature Planning &amp; Suggestions</li>
+          </ul>
+          <button type="button" id="team-member2-btn" class="modal-btn modal-btn-secondary team-card-btn">Portfolio</button>
+        </div>
       </div>
     </div>
   </div>

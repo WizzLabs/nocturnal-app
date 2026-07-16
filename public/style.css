@@ -437,6 +437,75 @@ body::after{
 .modal-actions-stacked{ flex-direction:column; }
 .modal-actions-stacked .modal-btn{ width:100%; }
 
+/* ── Meet the Team modal — two premium member cards, same modal language ── */
+.team-modal-box{ width:min(640px, 92vw); }
+.team-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:14px;
+  margin-top:4px;
+}
+.team-card{
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+  background:var(--bg);
+  border:1px solid var(--border-strong);
+  padding:16px;
+  transition:border-color var(--dur) var(--ease);
+}
+.team-card:hover{ border-color:var(--accent-dim); }
+.team-card-name{
+  font-family:var(--display);
+  font-weight:700;
+  font-size:14px;
+  letter-spacing:.02em;
+  color:var(--text);
+}
+.team-card-alias{
+  font-family:var(--mono);
+  font-weight:400;
+  font-size:11px;
+  color:var(--accent);
+  margin-left:4px;
+}
+.team-card-role{
+  font-family:var(--mono);
+  font-size:10.5px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--text-faint);
+}
+.team-card-list{
+  list-style:none;
+  margin:4px 0 6px;
+  padding:0;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+}
+.team-card-list li{
+  position:relative;
+  padding-left:12px;
+  font-family:var(--body);
+  font-size:12.5px;
+  line-height:1.5;
+  color:var(--text-dim);
+}
+.team-card-list li::before{
+  content:'';
+  position:absolute;
+  left:0;
+  top:8px;
+  width:4px;
+  height:4px;
+  background:var(--accent-dim);
+}
+.team-card-btn{
+  width:100%;
+  margin-top:auto;
+}
+
 /* ══════════════════ MAIN COLUMN ══════════════════ */
 .main{
   display:flex;
@@ -941,6 +1010,9 @@ body::after{
   .modal-box{ padding:18px; }
   .modal-actions{ flex-direction:column-reverse; gap:8px; }
   .modal-actions .modal-btn{ width:100%; text-align:center; }
+
+  /* Meet the Team modal — cards stack instead of squeezing side-by-side */
+  .team-grid{ grid-template-columns:1fr; gap:12px; }
 }
 
 @media (max-width: 420px){
