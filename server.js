@@ -157,14 +157,15 @@ const voiceLimiter = rateLimit({
   },
 });
 
-// Flash  → llama-4-scout-17b-16e-instruct  (tiny, ultra fast, vision capable)
-// Insight → llama-3.3-70b (smart, great for code)
-// Abyss  → qwen3-32b (reasoning)
+// FAST CASUAL CHAT: Low latency, 12K TPM limit, instant conversational replies
+// BALANCED WORKHORSE: Fast streaming, optimal for daily code and debugging
+// HEAVY REASONING & VISION: Deep thinking tasks and automated image/OCR handling
 const MODELS = {
-  flash:   "meta-llama/llama-4-scout-17b-16e-instruct",
-  insight: "llama-3.3-70b-versatile",
-  abyss:   "qwen/qwen3-32b",
+  flash:   "llama-3.3-70b-versatile", 
+  insight: "openai/gpt-oss-120b", 
+  abyss:   "qwen/qwen3.6-27b",         
 };
+
 
 // Model used for the capability planner (see lib/planner.js). Reuses the
 // flash model since it's already the fastest/cheapest option available —
@@ -484,11 +485,11 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
   }
 
   try {
-    // FIX: If an image is attached, always force flash (the only vision-capable model).
-    // This prevents auto-routing from picking insight/abyss and silently dropping the image.
+    // FIX: If an image is attached, always force abyss (the only vision-capable model).
+    // This prevents auto-routing from picking flash/insight and silently dropping the image.
     let selectedMode;
     if (image) {
-      selectedMode = "flash";
+      selectedMode = "abyss";
       console.log(`Mode: ${mode} → Forced flash (image attached)`);
     } else {
       selectedMode = mode === "auto"
