@@ -157,11 +157,11 @@ const voiceLimiter = rateLimit({
   },
 });
 
-// FAST CASUAL CHAT: Low latency, 12K TPM limit, instant conversational replies
+// FAST CASUAL CHAT: Low latency, 8K TPM limit, instant conversational replies
 // BALANCED WORKHORSE: Fast streaming, optimal for daily code and debugging
 // HEAVY REASONING & VISION: Deep thinking tasks and automated image/OCR handling
 const MODELS = {
-  flash:   "llama-3.3-70b-versatile", 
+  flash:   "openai/gpt-oss-20b", 
   insight: "openai/gpt-oss-120b", 
   abyss:   "qwen/qwen3.6-27b",         
 };
