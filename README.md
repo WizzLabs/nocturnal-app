@@ -151,7 +151,7 @@ Voice input and output are both handled entirely in the browser where possible, 
 |---|---|
 | Frontend | HTML, CSS, vanilla JavaScript |
 | Backend | Node.js, Express 5 |
-| AI Inference | [Groq](https://groq.com) (llama-3.3-70B,gpt-oss-120B,qwen3.6-27B) |
+| AI Inference | [Groq](https://groq.com) (Llama-3.3-70B,GPT-OSS-120B,Qwen3.6-27B) |
 | Live Search | [Tavily](https://tavily.com), behind a swappable search provider abstraction |
 | Auth & Database | [Supabase](https://supabase.com) (Postgres + Auth, with Row Level Security) |
 | Voice | Browser SpeechRecognition + speechSynthesis, Groq Whisper (fallback transcription) |
