@@ -3,17 +3,25 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import Groq from 'groq-sdk';
 import { createClient } from '@supabase/supabase-js';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import multer from 'multer';
 import crypto from 'crypto';
-import { planMessage } from './lib/planner.js';
+import { getDefaultAIClient, createAIClient } from './lib/providers/index.js';
+import { MODELS, PLANNER_MODEL } from './config/models.js';
 import { matchLocalTool } from './lib/localTools.js';
-import { getSearchProvider } from './lib/search/index.js';
-import { getCached, setCached } from './lib/search/cache.js';
-import { formatSearchContext } from './lib/search/formatContext.js';
+import { routeSearchDecision } from './lib/searchRouter.js';
+import { routeVision } from './lib/visionRouter.js';
+import { recordEntityFromMessage } from './lib/contextResolver.js';
+import * as SearchService from './services/search/index.js';
+import { formatSearchContext } from './services/search/formatContext.js';
+import * as VisionService from './services/vision/index.js';
+import * as VisionContext from './services/vision/context.js';
+import { buildGroundedPrompt as buildVisionGroundedPrompt } from './services/vision/promptBuilder.js';
+import { initSSE, sendStage, sendFinal, sendErrorEvent } from './lib/sse.js';
+import { routeDocument } from './lib/documentRouter.js';
+import * as DocumentService from './services/document/index.js';
+import { buildGroundedPrompt as buildDocumentGroundedPrompt } from './services/document/promptBuilder.js';
 
 dotenv.config();
 
@@ -84,7 +92,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── APIS & CLIENT INITIALIZATION ─────────────────────
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const aiClient = getDefaultAIClient();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 // ─── AUTH MIDDLEWARE ───────────────────────────────────
@@ -122,8 +130,8 @@ async function requireAuth(req, res, next) {
 }
 
 // ─── RATE LIMITING ─────────────────────────────────────
-// /chat triggers a billed Groq API call, so it's the endpoint that actually
-// needs protection from abuse. Keyed by authenticated user id when present
+// /chat triggers a billed AI provider call, so it's the endpoint that
+// actually needs protection from abuse. Keyed by authenticated user id when present
 // (the normal case, since requireAuth runs first) with IP as a fallback for
 // any request that somehow reaches here without one. Limits are intentionally
 // generous for a demo/personal-use environment, not a hard product tier.
@@ -140,37 +148,6 @@ const chatLimiter = rateLimit({
   },
 });
 
-
-// /voice/transcribe hits Whisper (also billed Groq usage), kept as its own
-// limiter so voice traffic can never eat into or be starved by the /chat
-// message quota above. Same key strategy (userId, IP fallback).
-const voiceLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000, // 10 minutes
-  max: 20,                  // 20 transcription requests per 10 minutes per user/IP
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => req.userId || req.ip,
-  handler: (req, res) => {
-    res.status(429).json({
-      error: 'Too many voice requests. Please wait a few minutes and try again.',
-    });
-  },
-});
-
-// FAST CASUAL CHAT: Low latency, 8K TPM limit, instant conversational replies
-// BALANCED WORKHORSE: Fast streaming, optimal for daily code and debugging
-// HEAVY REASONING & VISION: Deep thinking tasks and automated image/OCR handling
-const MODELS = {
-  flash:   "openai/gpt-oss-20b", 
-  insight: "openai/gpt-oss-120b", 
-  abyss:   "qwen/qwen3.6-27b",         
-};
-
-
-// Model used for the capability planner (see lib/planner.js). Reuses the
-// flash model since it's already the fastest/cheapest option available —
-// no need for a separate provider just for a small classification call.
-const PLANNER_MODEL = MODELS.flash;
 
 // ─── AUTO ROUTER KEYWORD ENGINE (MODEL TIER ONLY) ─────
 // NOTE: this selects which MODEL TIER answers (flash/insight/abyss) — it is
@@ -299,12 +276,12 @@ function decryptApiKey(encryptedApiKey, ivBase64) {
   }
 }
 
-// ─── BYOK: PER-USER GROQ CLIENT ────────────────────────
+// ─── BYOK: PER-USER AI PROVIDER CLIENT ─────────────────
 // Looks up the caller's stored settings and, if present and decryptable,
-// returns a Groq client scoped to their own key + their preferred model.
-// Returns null on ANY failure (no row, decrypt failure, DB error) — the
-// caller always has a working default client to fall back to.
-async function getUserGroqClient(userId) {
+// returns an AI provider client scoped to their own key + their preferred
+// model. Returns null on ANY failure (no row, decrypt failure, DB error) —
+// the caller always has a working default client to fall back to.
+async function getUserAIClient(userId) {
   try {
     const { data, error } = await supabase
       .from('user_ai_settings')
@@ -317,7 +294,7 @@ async function getUserGroqClient(userId) {
     const apiKey = decryptApiKey(data.encrypted_api_key, data.encryption_iv);
     if (!apiKey) return null;
 
-    return { client: new Groq({ apiKey }), model: data.model || null };
+    return { client: createAIClient({ apiKey }), model: data.model || null };
   } catch (err) {
     console.error(`BYOK lookup failed for user ${userId}:`, err.message);
     return null;
@@ -385,37 +362,16 @@ function buildPersonalitySection(personality) {
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB, matches base64 payload size
 const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
-const REQUEST_TIMEOUT_MS = 30 * 1000; // upstream Groq call must resolve within 30s
+const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024; // 10MB, matches base64 payload size
+const REQUEST_TIMEOUT_MS = 30 * 1000; // upstream AI provider call must resolve within 30s
 
-// ─── VOICE INPUT (STT) CONSTANTS ──────────────────────
-// Whisper runs on the shared server-side Groq key, so usage is capped
-// per-user, in seconds, on a rolling 24h window (see voice_usage table).
-const VOICE_DAILY_LIMIT_SECONDS = 10 * 60;        // 10 minutes/user/day
-const VOICE_WINDOW_MS = 24 * 60 * 60 * 1000;       // 24h rolling reset
-const MAX_AUDIO_BYTES = 15 * 1024 * 1024;          // 15MB raw upload cap
-const ALLOWED_AUDIO_MIME = [
-  'audio/mpeg', 'audio/mp3',
-  'audio/wav', 'audio/x-wav', 'audio/wave',
-  'audio/m4a', 'audio/mp4', 'audio/x-m4a',
-  'audio/webm',
-];
-
-// Memory storage — the file is only ever forwarded to Groq, never written
-// to disk, so there's nothing to clean up and no local exposure surface.
-const voiceUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_AUDIO_BYTES },
-  fileFilter: (req, file, cb) => {
-    if (!ALLOWED_AUDIO_MIME.includes(file.mimetype)) {
-      return cb(new Error('UNSUPPORTED_AUDIO_TYPE'));
-    }
-    cb(null, true);
-  },
-});
+// Voice input/output is handled entirely client-side via the browser's
+// native Web Speech API (SpeechRecognition/SpeechSynthesis) — see
+// public/script.js. There is no backend speech-to-text provider.
 
 // Validates the /chat request body. Returns an error string, or null if valid.
 function validateChatRequest(body) {
-  const { message, image } = body;
+  const { message, image, file } = body;
 
   if (typeof message !== 'string' || message.trim().length === 0) {
     return "Message cannot be empty.";
@@ -444,6 +400,24 @@ function validateChatRequest(body) {
     }
   }
 
+  // Sprint 6b — non-image files (the ones the Document Router/Service will
+  // handle). Images sent through the "Upload File" input are validated
+  // above via the `image` branch instead — server.js bridges those before
+  // this function ever sees the request (see the /chat handler).
+  if (file && !(typeof file.type === 'string' && file.type.startsWith('image/'))) {
+    if (typeof file !== 'object' || typeof file.name !== 'string' || typeof file.data !== 'string') {
+      return "Invalid file data.";
+    }
+    const match = file.data.match(/^data:[^;]+;base64,(.+)$/);
+    if (!match) {
+      return "File must be a valid base64 data URL.";
+    }
+    const approxBytes = Math.ceil(match[1].length * 0.75);
+    if (approxBytes > MAX_DOCUMENT_BYTES) {
+      return `File is too large (max ${MAX_DOCUMENT_BYTES / (1024 * 1024)}MB).`;
+    }
+  }
+
   return null;
 }
 
@@ -452,12 +426,39 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
   // Sprint 7: `personality` intentionally NOT destructured from req.body.
   // Personality is always loaded server-side via req.userId (see below) —
   // a client-supplied value is never trusted or used.
-  const { message, history, mode, sessionId, image } = req.body;
+  const { message, history, mode, sessionId, image: rawImage, file } = req.body;
+
+  // Objective 5/8 — the "Upload File" input accepts both documents and
+  // images (public/index.html's doc-uploader has accept="...,image/*"),
+  // but images must never go through the Document Router — they stay on
+  // the Vision pipeline, same as an image sent via the dedicated photo
+  // uploader. This is just an entry-point normalization, not a merge of
+  // the two services: Vision and Document routers remain fully
+  // independent below.
+  const image = rawImage || (file && (file.type || '').startsWith('image/') ? file.data : null);
+  const documentFile = (file && !(file.type || '').startsWith('image/')) ? file : null;
 
   const validationError = validateChatRequest(req.body);
   if (validationError) return res.status(400).json({ error: validationError });
 
   let timedOut = false;
+
+  // Sprint 6 — REAL-TIME PROCESSING EVENTS: everything past this point is
+  // committed to a streaming response (Objective 1). Headers go out now,
+  // before any slow work starts, so the frontend's connection opens
+  // immediately. From here on, failures must be reported as an SSE `error`
+  // event (lib/sse.js) — res.status()/res.json() can no longer be used,
+  // since HTTP headers are already flushed.
+  initSSE(res);
+
+  // If the client aborts (Stop button / navigates away), cancel whatever
+  // upstream AI call is in flight instead of letting it run to completion
+  // for nothing. attemptCompletion() (below) keeps this reference current
+  // for whichever request is actually active.
+  let currentController = null;
+  req.on('close', () => {
+    if (currentController) currentController.abort();
+  });
 
   // Sprint 8.5.1 — LOCAL TOOLS: requests like "what time is it" or "what's
   // today's date" don't need the planner, a search provider, or the LLM at
@@ -466,7 +467,7 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
   // local tool). Consumes zero search credits, zero planner calls, zero AI
   // tokens. Still persisted to chat_logs like any other turn so history/
   // continuity behave the same as a normal reply.
-  if (!image) {
+  if (!image && !documentFile) {
     const localMatch = matchLocalTool(message);
     if (localMatch) {
       console.log(`[LocalTool] ${localMatch.name}`);
@@ -475,57 +476,145 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
         saveConversationToDatabase(sessionId, message, localMatch.reply, localSelectedMode, image, req.userId)
           .catch(dbErr => console.error("Database storage tracking failure:", dbErr));
       }
-      return res.json({
+      sendFinal(res, {
         reply: localMatch.reply,
         mode: localSelectedMode,
         usedSearch: false,
         sources: [],
       });
+      return;
     }
   }
 
   try {
-    // FIX: If an image is attached, always force abyss (the only vision-capable model).
-    // This prevents auto-routing from picking flash/insight and silently dropping the image.
+    // Sprint 4 — VISION SERVICE: an attached image is never answered by the
+    // Vision Model directly. VisionRouter still decides which model does
+    // the *perception* (config/models.js VISION_MODEL), but the Vision
+    // Model's structured analysis is then handed to whichever chat model
+    // the user/Auto-mode actually selected (Flash/Insight/Abyss) — same
+    // mode-selection logic as any text-only request. This replaces the
+    // previous behavior where an image forced selectedMode = "abyss" and
+    // was sent straight to the Vision Model as the final answerer.
+    //
+    // visionInstruction, when set, carries the internal "Vision Analysis +
+    // question" prompt (services/vision/promptBuilder.js) that gets folded
+    // into the system prompt below instead of a raw image content block.
     let selectedMode;
+    let defaultModel;
+    let visionInstruction = null;
+    let documentInstruction = null;
+
     if (image) {
-      selectedMode = "abyss";
-      console.log(`Mode: ${mode} → Forced flash (image attached)`);
+      const vision = routeVision();
+      if (!vision.ok) {
+        sendErrorEvent(res, `I can't process images right now — ${vision.error}`, 503);
+        return;
+      }
+
+      // Objective 2 — image request: "Reading image..." is the first stage
+      // emitted, before "Thinking...".
+      sendStage(res, 'reading_image');
+
+      const visionResult = await VisionService.analyzeImage({
+        client: aiClient,
+        model: vision.model,
+        image,
+        question: message,
+      });
+
+      if (!visionResult.ok) {
+        // Never expose raw provider errors (Objective 9) — friendly
+        // message only. visionResult.error is logged inside VisionService.
+        sendErrorEvent(res, "I couldn't process that image right now. Please try again in a moment.", 503);
+        return;
+      }
+
+      // Objective 8: cache this analysis so follow-up questions about the
+      // same image don't re-trigger the Vision Model.
+      VisionContext.setAnalysis(sessionId, visionResult.analysis);
+      visionInstruction = buildVisionGroundedPrompt({ question: message, analysis: visionResult.analysis });
+      console.log('[Vision] Prompt built');
+
+      selectedMode = mode === "auto"
+        ? autoSelectMode(message)
+        : (MODELS[mode] ? mode : "flash");
+      defaultModel = MODELS[selectedMode];
+      console.log(`[Vision] Passing analysis to ${selectedMode} → Model: ${defaultModel}`);
+    } else if (documentFile) {
+      // Sprint 6b — DOCUMENT SERVICE: mirrors the Vision branch's shape
+      // exactly, but stays fully independent (Objective 8: "Do not merge
+      // Vision and Document logic. Keep both services independent.") —
+      // its own router, its own service, its own prompt builder, and it
+      // never touches VisionContext or the vision instruction.
+      const docRoute = routeDocument(documentFile);
+      if (!docRoute.ok) {
+        sendErrorEvent(res, docRoute.error, 400);
+        return;
+      }
+
+      // Objective 2 — document request: "Reading document..." first,
+      // before "Thinking...".
+      sendStage(res, 'reading_document');
+
+      const docResult = await DocumentService.extractText({ file: documentFile, type: docRoute.type });
+      if (!docResult.ok) {
+        const friendly = docResult.error === 'no_text'
+          ? "I couldn't find any readable text in that document."
+          : "I couldn't process that document right now. Please try again in a moment.";
+        sendErrorEvent(res, friendly, 400);
+        return;
+      }
+
+      documentInstruction = buildDocumentGroundedPrompt({
+        question: message,
+        docType: docRoute.type,
+        fileName: documentFile.name,
+        text: docResult.text,
+        truncated: docResult.truncated,
+      });
+      console.log('[Document] Prompt built');
+
+      selectedMode = mode === "auto"
+        ? autoSelectMode(message)
+        : (MODELS[mode] ? mode : "flash");
+      defaultModel = MODELS[selectedMode];
+      console.log(`[Document] Passing extracted text to ${selectedMode} → Model: ${defaultModel}`);
     } else {
       selectedMode = mode === "auto"
         ? autoSelectMode(message)
         : (MODELS[mode] ? mode : "flash");
-      console.log(`Mode: ${mode} → Selected: ${selectedMode} → Model: ${MODELS[selectedMode]}`);
+      defaultModel = MODELS[selectedMode];
+      console.log(`Mode: ${mode} → Selected: ${selectedMode} → Model: ${defaultModel}`);
+
+      // Objective 8: no new image this turn — reuse the last analyzed
+      // image's context (if any) for this session so follow-ups like
+      // "what color is the car?" stay grounded without another Vision call.
+      const cachedAnalysis = VisionContext.getAnalysis(sessionId);
+      if (cachedAnalysis) {
+        visionInstruction = buildVisionGroundedPrompt({ question: message, analysis: cachedAnalysis });
+        console.log('[Vision] Reusing cached analysis for follow-up');
+      }
     }
 
-    const defaultModel = MODELS[selectedMode];
+    // Objective 2 — "Thinking..." always fires next: after vision analysis
+    // (if any) has resolved, before search routing / prompt assembly. This
+    // matches every flow in the spec (normal, search, vision, document all
+    // pass through "Thinking..." at this point).
+    sendStage(res, 'thinking');
+
     const modeInstruction = modeInstructions[selectedMode];
 
-    // Sprint 8 — CAPABILITY PLANNER: decides whether this message needs
-    // live web information. Skipped entirely when an image is attached
-    // (that path is already deterministic — vision, not search). Always
-    // runs on the shared default Groq client, never a user's BYOK client,
-    // so planner cost/behavior stays predictable regardless of BYOK state.
-    // Fails closed to CHAT on any error — see lib/planner.js.
+    // Search context, sources, and clarify state — populated by the search
+    // routing block below for ANY text mode (Flash/Insight/Abyss/Auto).
+    // Only the image path (vision, handled deterministically above) leaves
+    // all three null/false and goes straight to completion.
     let searchContextBlock = null;
-    // Sprint 8.2: sources kept alongside the context block so the frontend
-    // can render an expandable "Sources" list without re-parsing the raw
-    // prompt block. searchFailed tracks a planned-but-failed search so the
-    // model can acknowledge it naturally instead of silently going quiet.
     let searchSources = [];
     let searchFailed = false;
-    // Sprint 8.5: the planner can also return CLARIFY for requests that are
-    // real-world/current but too broad to search usefully. clarifyQuestion
-    // is threaded into the system prompt below (same pattern as
-    // searchContextSection) so the main model asks it naturally instead of
-    // guessing a search or answering too broadly — no separate turn, no
-    // change to the request/response shape.
     let clarifyQuestion = null;
-    // Sprint 8.5.1: computed fresh per request (never hardcoded) and treated
-    // as the single source of truth for "today" — threaded into both the
-    // planner (so relative expressions like "this year" resolve into a
-    // concrete, current-year search query) and the main system prompt below
-    // (so the model never second-guesses it against its own training data).
+
+    // Computed fresh per request — single source of truth for "today" in both
+    // the planner prompt and the main system prompt below.
     const currentDate = new Date();
     const currentDateString = currentDate.toLocaleDateString('en-US', {
       weekday: 'long',
@@ -534,13 +623,31 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
       day: 'numeric',
     });
 
-    if (!image) {
-      const plan = await planMessage({
-        groqClient: groq,
+    // ── SEARCH ROUTING (Sprint 3) ──────────────────
+    // Search is an independent capability that sits ABOVE mode selection —
+    // it runs the same way regardless of whether the user picked Flash,
+    // Insight, Abyss, or Auto. selectedMode (already resolved above) is
+    // never read or altered here; this block only decides whether live
+    // search context gets injected before that model answers.
+    //
+    // Images still skip routing entirely: that path is deterministic
+    // (image attached → Vision Service in a future sprint; for now →
+    // abyss directly), same as before.
+    //
+    // lib/searchRouter.js owns the actual decision (via the capability
+    // planner) — this block just acts on whatever it returns:
+    //   CHAT    → answer normally, no search
+    //   SEARCH  → fetch live context, then answer
+    //   CLARIFY → ask a narrowing question before searching
+    {
+      const plan = await routeSearchDecision({
+        aiClient,
         plannerModel: PLANNER_MODEL,
         message,
         history,
         currentDateString,
+        image,
+        sessionId,
       });
 
       if (plan.route === 'CLARIFY') {
@@ -552,30 +659,33 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
         if (process.env.NODE_ENV !== 'production') {
           console.log(`[Planner] query: "${plan.query}" (category: ${plan.category})`);
         }
+        sendStage(res, 'searching');
         try {
-          let results = getCached(plan.query, plan.category);
-          if (results) {
-            console.log('[Cache] HIT');
-          } else {
-            console.log('[Cache] MISS');
-            const provider = getSearchProvider();
-            try {
-              console.log(`[Search] ${provider.name}`);
-              results = await provider.search(plan.query, { category: plan.category });
-            } catch (providerErr) {
-              console.log('[Search] Fallback');
-              throw providerErr; // no secondary provider configured yet — surfaces to outer catch
-            }
-            setCached(plan.query, results, plan.category);
-          }
+          // server.js never talks to a provider or the cache directly —
+          // SearchService owns cache lookup/write and provider resolution
+          // internally and always returns a normalized { provider, query,
+          // results } shape, regardless of which provider is active.
+          const { provider, results } = await SearchService.search(plan.query, {
+            category: plan.category,
+          });
+          console.log(`[Search] ${provider}`);
           searchContextBlock = formatSearchContext(results, plan.query);
           searchSources = Array.isArray(results)
             ? results.filter(r => r?.url && r?.title).map(r => ({ title: r.title, url: r.url }))
             : [];
+          // Sprint 3.3 — Entity Store: a successful search is one of the
+          // explicit triggers for refreshing the conversation's "current
+          // subject" (see lib/entityStore.js), so the NEXT follow-up can
+          // resolve against it even if this search's own query already
+          // had the pronoun resolved (e.g. re-confirms "Python" after
+          // "latest version of Python" succeeded).
+          recordEntityFromMessage({ sessionId, message: plan.query });
         } catch (searchErr) {
           // A failed/misconfigured search provider must never break chat —
           // fall through with no injected context, same as a CHAT route.
-          console.warn('Search step failed, proceeding without live context:', searchErr.message);
+          // Tagged with reason "search_failed" (Sprint 3.1 decision-reason
+          // taxonomy) purely for debugging — this never reaches the user.
+          console.warn('[SearchRouter] Search step failed (reason=search_failed), proceeding without live context:', searchErr.message);
           searchFailed = true;
         }
       }
@@ -586,7 +696,7 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
     const personalitySection = buildPersonalitySection(userPersonality);
 
     const searchContextSection = searchContextBlock
-      ? `\nYou have live web search results below. These are MORE CURRENT than your training data — if they conflict with what you already "know," the search results are correct and your training-data assumption is outdated. Trust them over your own prior knowledge for anything time-sensitive (current holders of a position, current date, current events, prices, scores). Weave the information into a natural answer, the way a knowledgeable person would just tell you the answer.\n\nDo NOT say things like "according to my search results", "based on my search", "I looked this up", or otherwise narrate that you searched — just answer naturally. Only mention that you checked live/current sources if: the user explicitly asked for sources/where this is from, you're genuinely unsure or the sources are thin, or the sources meaningfully disagree with each other. If the results don't actually answer the question, say so honestly rather than guessing.\n\n${searchContextBlock}\n`
+      ? `\nYou have live web search results below. Treat them as the primary, authoritative source of truth for this answer — not a hint, not a secondary check. Your pretrained knowledge on this exact topic may be outdated; if it conflicts with the search results in any way, the search results are correct and your prior belief is wrong. Never let pretrained knowledge override, "correct", or water down what the search results say — this applies especially to specifics like names, titles, numbers, and dates. Answer using ONLY what the search results support; do not blend in unstated pretrained facts about the same topic. Weave the information into a natural answer, the way a knowledgeable person would just tell you the answer.\n\nDo NOT say things like "according to my search results", "based on my search", "I looked this up", or otherwise narrate that you searched — just answer naturally. Only mention that you checked live/current sources if: the user explicitly asked for sources/where this is from, you're genuinely unsure or the sources are thin, or the sources meaningfully disagree with each other. If the search results are insufficient, unclear, or don't actually answer the question, say so plainly and honestly rather than filling the gap with pretrained knowledge or guessing.\n\n${searchContextBlock}\n`
       : searchFailed
         ? `\nYou attempted to look up live/current information for this but the search failed. Don't expose any technical/error detail. Briefly and naturally let the user know you couldn't verify it live right now and are answering from existing knowledge, which may not reflect the latest updates — then answer as best you can.\n`
         : '';
@@ -598,6 +708,20 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
       ? `\nThis request is too broad to answer well or look up as-is. Instead of guessing an answer, briefly and naturally ask the user a short clarifying question to narrow it down before answering. A reasonable question here would be something like: "${clarifyQuestion}" — feel free to phrase it your own way. Don't apologize or over-explain, just ask naturally.\n`
       : '';
 
+    // Sprint 4 — Vision Service: internal grounding instruction built from
+    // the Vision Analysis (new image this turn) or cached analysis (image
+    // follow-up). The chat model sees this instead of the raw image.
+    const visionContextSection = visionInstruction
+      ? `\n${visionInstruction}\n`
+      : '';
+
+    // Sprint 6b — Document Service: internal grounding instruction built
+    // from the extracted document text. The chat model never sees the raw
+    // file — only this normalized text via the prompt builder.
+    const documentContextSection = documentInstruction
+      ? `\n${documentInstruction}\n`
+      : '';
+
     // Assemble Custom Runtime Instructions
     const systemPrompt = `You are Nocturnal, a smart and human-like AI assistant.
 
@@ -605,7 +729,7 @@ Today's date is ${currentDateString}. This is injected fresh from the server clo
 
 Behavior:
 ${modeInstruction}
-${personalitySection}${searchContextSection}${clarifyContextSection}
+${personalitySection}${searchContextSection}${clarifyContextSection}${visionContextSection}${documentContextSection}
 Rules:
 - Speak naturally like a human, not a corporate assistant
 - Never say things like "Certainly!", "Of course!", "Great question!"
@@ -635,28 +759,23 @@ Rules:
       });
     }
 
-    // FIX: Build current message turn.
-    // If there's an image, always use the vision content array format.
-    if (image) {
-      messagesPayload.push({
-        role: 'user',
-        content: [
-          { type: 'text', text: message },
-          { type: 'image_url', image_url: { url: image } }
-        ]
-      });
-    } else {
-      messagesPayload.push({
-        role: 'user',
-        content: message
-      });
-    }
+    // Sprint 4: the chat model never receives the raw image — Vision
+    // Analysis (or cached analysis for a follow-up) is already folded into
+    // the system prompt above via visionContextSection. This keeps the
+    // chat model's input uniform (plain text) regardless of whether an
+    // image was involved this turn or a previous one.
+    messagesPayload.push({
+      role: 'user',
+      content: message
+    });
 
     // Sprint 7 — BYOK: try the user's own key/model first if they have one
-    // configured. getUserGroqClient() already fails closed (returns null)
+    // configured. getUserAIClient() already fails closed (returns null)
     // on any lookup/decrypt error, so byok is either a working client or null.
-    const byok = image ? null : await getUserGroqClient(req.userId); // image path stays on the shared vision-capable default for now
-    const activeClient = byok?.client || groq;
+    // Sprint 4: no longer restricted on the image path — the chat model
+    // only ever receives text now, so a user's own text-capable key works fine.
+    const byok = await getUserAIClient(req.userId);
+    const activeClient = byok?.client || aiClient;
     const activeModel = byok?.model || defaultModel;
 
     // Runs one completion attempt against a given client/model, bounded by
@@ -664,26 +783,30 @@ Rules:
     // time already spent on the first attempt.
     async function attemptCompletion(client, modelName) {
       const controller = new AbortController();
+      currentController = controller; // lets req.on('close') above cancel this attempt
       let localTimedOut = false;
       const id = setTimeout(() => {
         localTimedOut = true;
         controller.abort();
       }, REQUEST_TIMEOUT_MS);
       try {
-        const result = await client.chat.completions.create(
-          {
-            model: modelName,
-            messages: messagesPayload,
-            temperature: selectedMode === 'insight' ? 0.3 : 0.6,
-            max_completion_tokens: 2048,
-          },
-          { signal: controller.signal }
-        );
+        const result = await client.chatComplete({
+          model: modelName,
+          messages: messagesPayload,
+          temperature: selectedMode === 'insight' ? 0.3 : 0.6,
+          maxTokens: 2048,
+          signal: controller.signal,
+        });
         return { result, localTimedOut };
       } finally {
         clearTimeout(id);
       }
     }
+
+    // Objective 2 — last stage before the reply itself: fires once, right
+    // before the first completion attempt (BYOK retry-to-default below
+    // reuses the same "Generating..." stage rather than re-emitting it).
+    sendStage(res, 'generating');
 
     let completion;
     let modelUsed = activeModel;
@@ -697,7 +820,7 @@ Rules:
       if (byok && err.name !== 'AbortError') {
         console.warn(`BYOK request failed for user ${req.userId}, falling back to default client:`, err.message);
         try {
-          const { result, localTimedOut } = await attemptCompletion(groq, defaultModel);
+          const { result, localTimedOut } = await attemptCompletion(aiClient, defaultModel);
           completion = result;
           timedOut = localTimedOut;
           modelUsed = defaultModel;
@@ -719,122 +842,55 @@ Rules:
         .catch(dbErr => console.error("Database storage tracking failure:", dbErr));
     }
 
-    if (!res.headersSent) {
-      return res.json({
-        reply,
-        mode: selectedMode,
-        usedSearch: !!searchContextBlock,
-        sources: searchContextBlock ? searchSources : [],
-      });
-    }
+    sendFinal(res, {
+      reply,
+      mode: selectedMode,
+      usedSearch: !!searchContextBlock,
+      sources: searchContextBlock ? searchSources : [],
+    });
 
   } catch (err) {
     if (err.name === "AbortError") {
       if (timedOut) {
         console.log("⏱️ Upstream AI request timed out");
-        if (!res.headersSent) {
-          res.status(504).json({ reply: "The AI provider took too long to respond. Please try again." });
-        }
+        sendErrorEvent(res, "The AI provider took too long to respond. Please try again.", 504);
         return;
       }
+      // Client disconnected (Stop button / navigation) — nothing to send
+      // back, the connection is already gone.
       console.log("🛑 Request cancelled");
-      if (!res.headersSent) res.status(499).end();
+      if (!res.writableEnded) res.end();
       return;
     }
     console.error("AI Operations failure:", err);
-    if (!res.headersSent) {
-      res.status(500).json({ reply: "❌ Something went wrong. Please try again." });
-    }
+    sendErrorEvent(res, "❌ Something went wrong. Please try again.", 500);
   }
 });
 
-// ─── ENDPOINT: VOICE TRANSCRIPTION (STT) ──────────────
-// Accepts an audio clip, transcribes it via Groq Whisper, and returns the
-// transcript as plain text. Does NOT call /chat or touch chat_logs — the
-// frontend takes the transcript, drops it in the composer, and the existing
-// sendMessage() → /chat flow handles everything from there unchanged.
-app.post('/voice/transcribe', requireAuth, voiceLimiter, (req, res) => {
-  voiceUpload.single('audio')(req, res, async (uploadErr) => {
-    if (uploadErr) {
-      if (uploadErr.message === 'UNSUPPORTED_AUDIO_TYPE') {
-        return res.status(400).json({ error: 'Unsupported audio format. Use mp3, wav, m4a, or webm.' });
-      }
-      if (uploadErr.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: `Audio file is too large (max ${MAX_AUDIO_BYTES / (1024 * 1024)}MB).` });
-      }
-      console.error('Voice upload failure:', uploadErr);
-      return res.status(400).json({ error: 'Could not process the uploaded audio.' });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ error: 'No audio file provided.' });
-    }
-
-    try {
-      // Check quota BEFORE spending the Groq call — worst case here is a
-      // slightly stale usage read, never an unbounded overage, since the
-      // charge itself is applied atomically after we know actual duration.
-      const preCheck = await getVoiceUsage(req.userId);
-      if (preCheck.secondsUsedToday >= VOICE_DAILY_LIMIT_SECONDS) {
-        const resetsAt = new Date(new Date(preCheck.windowStartedAt).getTime() + VOICE_WINDOW_MS).toISOString();
-        return res.status(429).json({
-          error: "You've used up today's voice minutes. It resets in 24h — text chat still works great in the meantime.",
-          resetsAt,
-        });
-      }
-
-      // verbose_json gives us the real clip duration so usage is charged
-      // accurately instead of estimated from file size.
-      const transcription = await groq.audio.transcriptions.create({
-        file: new File([req.file.buffer], req.file.originalname || 'audio.webm', { type: req.file.mimetype }),
-        model: 'whisper-large-v3-turbo',
-        response_format: 'verbose_json',
-      });
-
-      const transcript = (transcription.text || '').trim();
-      const durationSeconds = Math.max(10, Math.ceil(transcription.duration || 0));
-
-      const usage = await checkAndChargeVoiceUsage(req.userId, durationSeconds);
-      if (!usage.allowed) {
-        return res.status(429).json({
-          error: "That clip would put you over today's voice limit. It resets in 24h — text chat still works great in the meantime.",
-          resetsAt: usage.resetsAt,
-        });
-      }
-
-      console.log(`  ✓ Voice transcribed (${durationSeconds}s, user ${req.userId})`);
-      return res.json({
-        transcript,
-        usage: {
-          secondsUsedToday: usage.secondsUsedToday,
-          remainingSeconds: usage.remainingSeconds,
-          limitSeconds: usage.limitSeconds,
-          resetsAt: usage.resetsAt,
-        },
-      });
-    } catch (err) {
-      console.error('Voice transcription failure:', err);
-      return res.status(500).json({ error: 'Could not transcribe that clip. Please try again.' });
-    }
-  });
-});
-
-// ─── ENDPOINT: VOICE USAGE STATUS ─────────────────────
-app.get('/voice/usage', requireAuth, async (req, res) => {
-  try {
-    const usage = await getVoiceUsage(req.userId);
-    const resetsAt = new Date(new Date(usage.windowStartedAt).getTime() + VOICE_WINDOW_MS).toISOString();
-    return res.json({
-      secondsUsedToday: usage.secondsUsedToday,
-      remainingSeconds: Math.max(0, VOICE_DAILY_LIMIT_SECONDS - usage.secondsUsedToday),
-      limitSeconds: VOICE_DAILY_LIMIT_SECONDS,
-      resetsAt,
+// ─── DATABASE PERSISTENCE ──────────────────────────────
+// Inserts one completed turn (user message + AI reply) into chat_logs.
+// Called fire-and-forget at both call sites (.catch() logs, never throws),
+// so a DB failure never blocks the response already on its way to the client.
+//
+// Schema columns written here must stay in sync with the SELECT in
+// GET /sessions/:sessionId (user_message, ai_response, mode, attached_asset).
+async function saveConversationToDatabase(sessionId, userMessage, aiResponse, mode, image, userId) {
+  const { error } = await supabase
+    .from('chat_logs')
+    .insert({
+      session_id:     sessionId,
+      user_id:        userId,
+      user_message:   userMessage,
+      ai_response:    aiResponse,
+      mode:           mode,
+      // image is the raw base64 data-URL string when present, null otherwise.
+      // Stored as `attached_asset` to keep the column name provider-agnostic
+      // (future sprints may attach other asset types).
+      attached_asset: image || null,
     });
-  } catch (err) {
-    console.error('Failed to fetch voice usage:', err);
-    return res.status(500).json({ error: 'Could not fetch voice usage.' });
-  }
-});
+
+  if (error) throw error;
+}
 
 // ─── ENDPOINT: RETRIEVE ALL DISTINCT SESSIONS ─────────
 app.get('/history/all', requireAuth, async (req, res) => {
@@ -940,85 +996,6 @@ app.patch(`/sessions/:sessionId/title`, requireAuth, async (req, res) => {
     return res.status(500).json({ error: "Could not rename session." });
   }
 });
-
-// ─── VOICE USAGE TRACKING ──────────────────────────────
-// Reads the caller's voice_usage row, resets it if the 24h window has
-// elapsed, and reports current state. Does not write — callers decide
-// whether to increment based on whether the request is allowed.
-async function getVoiceUsage(userId) {
-  const { data, error } = await supabase
-    .from('voice_usage')
-    .select('seconds_used_today, window_started_at')
-    .eq('user_id', userId)
-    .maybeSingle();
-
-  if (error) throw error;
-
-  const now = Date.now();
-  if (!data) {
-    return { secondsUsedToday: 0, windowStartedAt: new Date(now).toISOString(), isNewWindow: true };
-  }
-
-  const windowAge = now - new Date(data.window_started_at).getTime();
-  if (windowAge > VOICE_WINDOW_MS) {
-    return { secondsUsedToday: 0, windowStartedAt: new Date(now).toISOString(), isNewWindow: true };
-  }
-
-  return { secondsUsedToday: data.seconds_used_today, windowStartedAt: data.window_started_at, isNewWindow: false };
-}
-
-// Attempts to charge `deltaSeconds` against the user's daily voice quota.
-// Returns { allowed, secondsUsedToday, remainingSeconds, limitSeconds, resetsAt }.
-// Only persists the increment when allowed — a rejected/over-limit request
-// never gets written, so it can't push the user further over.
-async function checkAndChargeVoiceUsage(userId, deltaSeconds) {
-  const usage = await getVoiceUsage(userId);
-  const projected = usage.secondsUsedToday + deltaSeconds;
-  const resetsAt = new Date(new Date(usage.windowStartedAt).getTime() + VOICE_WINDOW_MS).toISOString();
-
-  if (projected > VOICE_DAILY_LIMIT_SECONDS) {
-    return {
-      allowed: false,
-      secondsUsedToday: usage.secondsUsedToday,
-      remainingSeconds: Math.max(0, VOICE_DAILY_LIMIT_SECONDS - usage.secondsUsedToday),
-      limitSeconds: VOICE_DAILY_LIMIT_SECONDS,
-      resetsAt,
-    };
-  }
-
-  const { error } = await supabase
-    .from('voice_usage')
-    .upsert(
-      { user_id: userId, seconds_used_today: projected, window_started_at: usage.windowStartedAt },
-      { onConflict: 'user_id' }
-    );
-  if (error) throw error;
-
-  return {
-    allowed: true,
-    secondsUsedToday: projected,
-    remainingSeconds: Math.max(0, VOICE_DAILY_LIMIT_SECONDS - projected),
-    limitSeconds: VOICE_DAILY_LIMIT_SECONDS,
-    resetsAt,
-  };
-}
-
-// ─── DATABASE LOG PERSISTENCE ─────────────────────────
-async function saveConversationToDatabase(sessionId, userMsg, aiResponse, mode, base64Image, userId) {
-  const { error } = await supabase
-    .from('chat_logs')
-    .insert([
-      {
-        session_id: sessionId,
-        user_id: userId,
-        user_message: userMsg,
-        ai_response: aiResponse,
-        mode: mode,
-        attached_asset: base64Image || null   // store full base64 so image survives refresh
-      }
-    ]);
-  if (error) throw error;
-}
 
 // ─── ENDPOINT: AI SETTINGS (BYOK — Sprint 7) ──────────
 // GET returns only { hasSettings, model } — the API key itself is NEVER
@@ -1176,7 +1153,6 @@ app.delete('/api/account', requireAuth, async (req, res) => {
   try {
     const tableDeletes = await Promise.all([
       supabase.from('chat_logs').delete().eq('user_id', userId),
-      supabase.from('voice_usage').delete().eq('user_id', userId),
       supabase.from('user_ai_settings').delete().eq('user_id', userId),
       supabase.from('user_personality').delete().eq('user_id', userId),
     ]);
@@ -1208,11 +1184,11 @@ app.get('/api/config', (_req, res) => {
 // ─── SERVER LISTENER ───────────────────────────────────
 const server = app.listen(PORT, () => {
   console.log(`\x1b[35m[NOCTURNAL CORE ACTIVE]\x1b[0m Running on http://localhost:${PORT}`);
-  console.log("GROQ KEY EXISTS:", !!process.env.GROQ_API_KEY);
+  console.log("NVIDIA KEY EXISTS:", !!process.env.NVIDIA_API_KEY);
 });
 
 // Defense-in-depth: caps how long ANY connection can stay open, independent
-// of the per-request Groq timeout above. Prevents slow/hung clients or
+// of the per-request AI provider timeout above. Prevents slow/hung clients or
 // network issues from holding sockets open indefinitely.
 server.requestTimeout = 60 * 1000;   // 60s hard ceiling per request
 server.headersTimeout = 65 * 1000;   // must exceed requestTimeout per Node docs

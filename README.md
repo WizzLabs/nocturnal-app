@@ -1,6 +1,6 @@
 # Nocturnal AI
 
-A full-stack, self-hosted AI chat application with per-user authentication, isolated chat history, live web search, voice input/output, and optional "bring your own key" (BYOK) support — built with Node.js, Express, Groq, Tavily, and Supabase.
+A full-stack, self-hosted AI chat application with per-user authentication, isolated chat history, live web search, voice input/output, and optional "bring your own key" (BYOK) support — built with Node.js, Express, NVIDIA NIM, Tavily, and Supabase.
 
 ![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 ![Express](https://img.shields.io/badge/express-5.x-000000)
@@ -40,7 +40,7 @@ Nocturnal can now tell when it needs to *know* something versus when it needs to
 - **Multi-model routing** — Flash / Insight / Abyss / Auto, switchable per message
 - **Live web search** — planner-gated, Tavily-powered, cached, and cited with an expandable Sources panel
 - **Local tools** — instant, AI-free answers for time/date-style requests
-- **Full voice pipeline** — browser speech-to-text with a Groq Whisper fallback, and multilingual browser text-to-speech
+- **Voice input/output** — fully browser-native speech-to-text and multilingual text-to-speech, zero backend/AI cost
 - **Personality system** — response-style presets plus free-form custom instructions, applied server-side
 - **BYOK** — bring your own API key and model, used in place of the server defaults
 - **Hardened authentication** — email verification and password recovery on top of Supabase auth
@@ -76,18 +76,18 @@ The landing page is a dark, "classified terminal" style aesthetic — black back
   - **Insight** — balanced, code/technical-focused responses
   - **Abyss** — deep, deliberate reasoning for complex questions
   - **Auto** — picks Flash, Insight, or Abyss based on the content of your message
-- 🎙️ **Voice input** — browser-native `SpeechRecognition` for live dictation, with a Groq Whisper fallback for uploaded audio clips or unsupported browsers. Usage is tracked against a daily voice quota.
+- 🎙️ **Voice input** — browser-native `SpeechRecognition` for live dictation. Entirely client-side, no backend involvement.
 - 🔊 **Voice output (TTS)** — browser `speechSynthesis`, entirely client-side. Picks the closest installed voice to the AI response's detected language (exact locale → same language family → browser default), and fails silently if nothing suitable is installed.
 - 🎭 **Personality system** — choose a response-style preset (Professional, Casual, Creative, Technical) and optionally add custom instructions; applied server-side on every request.
 - 🖼️ **Image upload with vision** — attach an image and ask questions about it.
 - 📝 **Markdown + code blocks** — clean rendering with copyable code blocks.
 - 🗂️ **Session management** — search, rename, delete, and revisit past conversations from the sidebar.
 - 🔑 **Personal AI configuration (BYOK)** — optionally configure your own API key and model. When active, it's used for every request instead of Nocturnal's defaults, and image uploads are validated against known vision-capable models rather than silently falling back.
-- 🗑️ **Secure account deletion** — permanently deletes a user's auth record along with all owned chat logs, voice usage, AI settings, and personality preferences, with cascading foreign keys as a database-level backstop.
+- 🗑️ **Secure account deletion** — permanently deletes a user's auth record along with all owned chat logs, AI settings, and personality preferences, with cascading foreign keys as a database-level backstop.
 - 💬 **In-app feedback** — a Feedback modal linking to a feedback form and the creator's portfolio.
 - 🛡️ **Security hardening**
   - Helmet.js with a scoped Content Security Policy
-  - Per-user (fallback per-IP) rate limiting on AI and voice requests
+  - Per-user (fallback per-IP) rate limiting on AI requests
   - Input validation (message length, image size/type)
   - Environment-aware CORS allowlist
   - Request timeouts with graceful upstream-failure handling
@@ -110,12 +110,11 @@ This keeps search fast and cheap (cache-first, category-aware TTLs), keeps answe
 
 ## Voice Features
 
-Voice input and output are both handled entirely in the browser where possible, with a server-side fallback only for transcription:
+Voice input and output are both handled entirely in the browser, with no backend or AI provider involvement:
 
-- **Speech-to-text** — `SpeechRecognition` runs live in supported browsers; audio clip uploads or unsupported browsers fall back to Groq Whisper transcription.
+- **Speech-to-text** — `SpeechRecognition` runs live in supported browsers.
 - **Text-to-speech** — `speechSynthesis.getVoices()` only, no external APIs. Detects the response's language and prefers an exact-locale voice, then same language family, then the browser default.
 - **Playback state** — only one message can be speaking at a time; the speaker icon animates while active and returns to idle when playback finishes or is cancelled.
-- **Voice quota** — daily voice usage is tracked per user and shown in the input bar.
 
 ![Voice input/output demo](assets/demo-voice.gif)
 
@@ -151,11 +150,10 @@ Voice input and output are both handled entirely in the browser where possible, 
 |---|---|
 | Frontend | HTML, CSS, vanilla JavaScript |
 | Backend | Node.js, Express 5 |
-| AI Inference | [Groq](https://groq.com) (GPT-OSS-20B,GPT-OSS-120B,Qwen3.6-27B) |
+| AI Inference | [NVIDIA NIM](https://build.nvidia.com) — pluggable AI provider abstraction (`lib/providers/`), NVIDIA is the default/primary provider |
 | Live Search | [Tavily](https://tavily.com), behind a swappable search provider abstraction |
 | Auth & Database | [Supabase](https://supabase.com) (Postgres + Auth, with Row Level Security) |
-| Voice | Browser SpeechRecognition + speechSynthesis, Groq Whisper (fallback transcription) |
-| File uploads | Multer (in-memory, image/audio) |
+| Voice | Browser SpeechRecognition + speechSynthesis, entirely client-side |
 | Security | Helmet, express-rate-limit, AES-256-GCM (key encryption) |
 
 ---
@@ -163,7 +161,7 @@ Voice input and output are both handled entirely in the browser where possible, 
 ## Architecture Overview
 
 - **Client** (`public/`) — static HTML/CSS/vanilla JS, no build step. `script.js` drives chat, voice, and session UI; `settings.js`, `personality.js`, `feedback.js`, and `account.js` each own a single modal or flow and talk to their own API routes.
-- **Server** (`server.js`) — a single Express app exposing chat, voice, session, and settings routes behind an auth middleware that verifies the Supabase session token — and email verification status — on every request.
+- **Server** (`server.js`) — a single Express app exposing chat, session, and settings routes behind an auth middleware that verifies the Supabase session token — and email verification status — on every request.
 - **Routing pipeline** — every chat message flows through local tools, then the planner, before it reaches the model:
 
   ```
@@ -175,14 +173,15 @@ Voice input and output are both handled entirely in the browser where possible, 
     ↓
   CHAT / SEARCH / CLARIFY
     ↓
-  Groq + Tavily   (model response, optionally grounded in live search results)
+  AI Provider + Tavily   (model response, optionally grounded in live search results)
     ↓
   Response
   ```
 
 - **AI pipeline** — mode (Flash/Insight/Abyss/Auto) and personality are resolved server-side per request, live search context is injected when the planner routes to `SEARCH`, and BYOK users' personal key/model are decrypted and substituted in place of the server defaults.
+- **AI provider layer** (`lib/providers/`) — a provider abstraction (`index.js`) sits in front of the active provider (`nvidia.js`), exposing a single `chatComplete()` interface. The rest of the app never knows which provider generated a response, so swapping or adding providers (e.g. a Gemini fallback) doesn't touch `server.js` or `lib/planner.js`.
 - **Search layer** (`lib/search/`) — a provider abstraction (`index.js`) sits in front of the active provider (`tavily.js`), with shared result caching (`cache.js`) and context formatting (`formatContext.js`) that stay provider-agnostic.
-- **Database** — Supabase Postgres holds chat logs, voice usage, AI settings, and personality preferences, all scoped by `user_id`, enforced with Row Level Security, and cleaned up automatically on account deletion via cascading foreign keys.
+- **Database** — Supabase Postgres holds chat logs, AI settings, and personality preferences, all scoped by `user_id`, enforced with Row Level Security, and cleaned up automatically on account deletion via cascading foreign keys.
 
 ---
 
@@ -192,7 +191,7 @@ Voice input and output are both handled entirely in the browser where possible, 
 
 - Node.js 18+
 - A [Supabase](https://supabase.com) project
-- A [Groq](https://console.groq.com) API key
+- An [NVIDIA NIM](https://build.nvidia.com) API key
 - A [Tavily](https://tavily.com) API key (for live search)
 
 ### 1. Clone and install
@@ -214,7 +213,8 @@ cp .env.example .env
 | Variable | Required | Description |
 |---|---|---|
 | `PORT` | No (defaults to 3000) | Port the server runs on |
-| `GROQ_API_KEY` | Yes | Your Groq API key (server default, used when a user has no personal config) |
+| `AI_PROVIDER` | No (defaults to `nvidia`) | Which AI provider to use (see `lib/providers/`) |
+| `NVIDIA_API_KEY` | Yes | Your NVIDIA NIM API key (server default, used when a user has no personal config) |
 | `SUPABASE_URL` | Yes | Your Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | Supabase service role key (server-side only — **never expose this to the browser**) |
 | `SUPABASE_ANON_KEY` | Yes | Supabase anon/public key (safe for the browser) |

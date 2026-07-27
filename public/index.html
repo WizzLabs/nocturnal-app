@@ -280,6 +280,13 @@
           </div>
         </div>
 
+        <div id="file-preview-box" class="attachment-preview">
+          <div class="attachment-chip attachment-chip-file">
+            <span id="preview-file-name" class="attachment-chip-filename"></span>
+            <button id="remove-file-btn" title="Remove file">✕</button>
+          </div>
+        </div>
+
         <div id="voice-status-bar" class="voice-status-bar">
           <span id="voice-status-text" class="voice-status-text"></span>
           <button id="voice-status-cancel-btn" class="voice-status-cancel-btn" title="Cancel">✕</button>
@@ -287,25 +294,21 @@
 
         <div class="input-box">
           <input type="file" id="file-uploader" accept="image/*" style="display: none;" />
-          <input type="file" id="audio-uploader" accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/m4a,audio/mp4,audio/x-m4a,audio/webm" style="display: none;" />
+          <input type="file" id="doc-uploader" accept=".pdf,.docx,.txt,.md,.xlsx,image/*" style="display: none;" />
           <div class="attach-menu-wrap">
-            <button id="attach-btn" class="attach-btn" title="Attach">＋</button>
+            <button id="attach-btn" class="attach-btn" title="Attach">
+              <svg class="dots-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <circle cx="5" cy="12" r="1.6" fill="currentColor"/>
+                <circle cx="12" cy="12" r="1.6" fill="currentColor"/>
+                <circle cx="19" cy="12" r="1.6" fill="currentColor"/>
+              </svg>
+            </button>
             <div id="attach-menu" class="attach-menu">
               <button type="button" id="attach-image-option" class="attach-menu-item">
-                <svg class="menu-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                  <rect x="3.5" y="4.5" width="17" height="15" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-                  <circle cx="8.5" cy="9.5" r="1.5" stroke="currentColor" stroke-width="1.5"/>
-                  <path d="M4 16.5L9 12l3.5 3.2L15.5 12 20 16" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <span>Image</span>
+                <span>Upload Photo</span>
               </button>
-              <button type="button" id="attach-audio-option" class="attach-menu-item">
-                <svg class="menu-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                  <path d="M9 17.5V6.2L19 4v11.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                  <circle cx="6.5" cy="17.5" r="2.5" stroke="currentColor" stroke-width="1.5"/>
-                  <circle cx="16.5" cy="15.3" r="2.5" stroke="currentColor" stroke-width="1.5"/>
-                </svg>
-                <span>Audio clip</span>
+              <button type="button" id="attach-file-option" class="attach-menu-item">
+                <span>Upload File</span>
               </button>
             </div>
           </div>

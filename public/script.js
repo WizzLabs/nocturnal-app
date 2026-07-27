@@ -1,12 +1,14 @@
 // ─── STATE MANAGEMENT ────────────────────────────────
 let currentSessionId = localStorage.getItem('current_session_id') || 'session_' + Date.now();
 let attachedImageBase64 = null;
+let attachedFile = null; // { name, type, data } — doc/image attachment, backed by the Document/Vision services
 let chatHistory = [];
 let isThinking = false;
 let currentMode = "flash";
 let controller = null;
 let thinkingRow = null;
 let currentRequestId = 0;
+
 
 localStorage.setItem('current_session_id', currentSessionId);
 
@@ -51,10 +53,14 @@ const sidebarToggleBtn   = document.getElementById("sidebar-toggle-btn");
 const sidebarBackdrop    = document.getElementById("sidebar-backdrop");
 const newChatBtn         = document.getElementById('new-chat-btn');
 const fileUploader       = document.getElementById('file-uploader');
+const docUploader        = document.getElementById('doc-uploader');
 const attachBtn          = document.getElementById('attach-btn');
 const imagePreviewBox    = document.getElementById('image-preview-box');
 const previewImg         = document.getElementById('preview-img');
 const removeImgBtn       = document.getElementById('remove-img-btn');
+const filePreviewBox     = document.getElementById('file-preview-box');
+const previewFileName    = document.getElementById('preview-file-name');
+const removeFileBtn      = document.getElementById('remove-file-btn');
 const chatHistoryList    = document.getElementById('chat-history-list');
 const historySearchInput = document.getElementById('search-chats');
 
@@ -62,12 +68,10 @@ const historySearchInput = document.getElementById('search-chats');
 const micBtn              = document.getElementById('mic-btn');
 const attachMenu           = document.getElementById('attach-menu');
 const attachImageOption    = document.getElementById('attach-image-option');
-const attachAudioOption    = document.getElementById('attach-audio-option');
-const audioUploader       = document.getElementById('audio-uploader');
+const attachFileOption     = document.getElementById('attach-file-option');
 const voiceStatusBar      = document.getElementById('voice-status-bar');
 const voiceStatusText     = document.getElementById('voice-status-text');
 const voiceStatusCancelBtn = document.getElementById('voice-status-cancel-btn');
-const voiceUsageIndicator = document.getElementById('voice-usage-indicator');
 
 // ─── SIDEBAR CHAT HISTORY & SEARCH ───────────────────
 async function loadSidebarHistory() {
@@ -371,8 +375,8 @@ if (newChatBtn) {
 }
 
 // ─── IMAGE UPLOAD HANDLING ───────────────────────────
-// attach-btn now opens a small menu (Image / Audio clip) instead of going
-// straight to the image picker, since audio upload lives here too now.
+// attach-btn (three-dot icon) opens a small menu with "Upload Photo" and
+// "Upload File" instead of going straight to the image picker.
 // Sprint 6.5: switched from display:none/block toggling to a class-based
 // 'open' state so both the open AND close motion can be animated in CSS
 // (display swaps can't be transitioned).
@@ -396,13 +400,6 @@ if (attachImageOption) {
   attachImageOption.addEventListener('click', () => {
     closeAttachMenu();
     if (fileUploader) fileUploader.click();
-  });
-}
-
-if (attachAudioOption) {
-  attachAudioOption.addEventListener('click', () => {
-    closeAttachMenu();
-    if (audioUploader) audioUploader.click();
   });
 }
 
@@ -450,22 +447,69 @@ function clearImageAttachment() {
   if (fileUploader) fileUploader.value = '';
   if (imagePreviewBox) imagePreviewBox.classList.remove('show');
   if (previewImg) previewImg.src = '';
-  if (attachBtn) attachBtn.classList.remove('has-file');
+  if (attachBtn && !attachedFile) attachBtn.classList.remove('has-file');
+}
+
+// ─── DOCUMENT UPLOAD HANDLING (Upload File) ──────────
+// Sprint 6b: fully wired to the backend Document Service. PDF, DOCX, TXT,
+// Markdown, and XLSX are parsed and answered from their actual content;
+// images selected here (accept also allows image/*) are routed to the
+// existing Vision pipeline server-side instead — see server.js.
+const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024; // mirrors server.js MAX_DOCUMENT_BYTES
+
+if (attachFileOption) {
+  attachFileOption.addEventListener('click', () => {
+    closeAttachMenu();
+    if (docUploader) docUploader.click();
+  });
+}
+
+if (docUploader) {
+  docUploader.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    if (file.size > MAX_DOCUMENT_BYTES) {
+      appendMessage('ai', `"${file.name}" is too large (max ${MAX_DOCUMENT_BYTES / (1024 * 1024)}MB).`);
+      e.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      attachedFile = {
+        name: file.name,
+        type: file.type || 'application/octet-stream',
+        data: event.target.result
+      };
+      if (previewFileName) previewFileName.textContent = file.name;
+      if (filePreviewBox) filePreviewBox.classList.add('show');
+      if (attachBtn) attachBtn.classList.add('has-file');
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+if (removeFileBtn) {
+  removeFileBtn.addEventListener('click', clearFileAttachment);
+}
+
+function clearFileAttachment() {
+  attachedFile = null;
+  if (docUploader) docUploader.value = '';
+  if (filePreviewBox) filePreviewBox.classList.remove('show');
+  if (previewFileName) previewFileName.textContent = '';
+  if (attachBtn && !attachedImageBase64) attachBtn.classList.remove('has-file');
 }
 
 // ─── VOICE INPUT (STT) ────────────────────────────────
-// Self-contained: records or accepts an uploaded audio clip, sends it to
-// /voice/transcribe, and drops the resulting transcript into the composer
-// for the user to review/edit. Never calls sendMessage() itself — the user
-// always presses Send manually. Reuses authHeaders() from above; does not
-// touch chatHistory, sendMessage(), or the /chat pipeline.
+// Entirely browser-native via the Web Speech API (SpeechRecognition) — no
+// backend involvement, no AI provider cost. Never calls sendMessage()
+// itself — the user always presses Send manually.
 
-const VOICE_STATES = { IDLE: 'idle', RECORDING: 'recording', UPLOADING: 'uploading', TRANSCRIBING: 'transcribing', READY: 'ready', ERROR: 'error' };
+const VOICE_STATES = { IDLE: 'idle', RECORDING: 'recording', READY: 'ready', ERROR: 'error' };
 
-let mediaRecorder = null;
-let recordedChunks = [];
 let voiceState = VOICE_STATES.IDLE;
-let activeVoicePath = null; // 'native' | 'whisper' | null — drives which status label shows
 
 function setVoiceState(state, message = '') {
   voiceState = state;
@@ -485,9 +529,7 @@ function setVoiceState(state, message = '') {
 
   let label = '';
   if (state === VOICE_STATES.RECORDING) {
-    label = activeVoicePath === 'native' ? 'Listening…' : 'Using AI transcription…';
-  } else if (state === VOICE_STATES.UPLOADING || state === VOICE_STATES.TRANSCRIBING) {
-    label = 'Using AI transcription...';
+    label = 'Listening…';
   } else if (state === VOICE_STATES.READY) {
     label = '✓ Transcript ready';
   }
@@ -497,7 +539,6 @@ function setVoiceState(state, message = '') {
   voiceStatusText.textContent = label;
 
   if (micBtn) micBtn.classList.toggle('recording', state === VOICE_STATES.RECORDING);
-  if (micBtn) micBtn.disabled = state === VOICE_STATES.UPLOADING || state === VOICE_STATES.TRANSCRIBING;
 
   // READY is terminal-but-visible; auto-clear after a moment.
   if (state === VOICE_STATES.READY) {
@@ -505,68 +546,7 @@ function setVoiceState(state, message = '') {
   }
 }
 
-function renderVoiceUsage(usage) {
-  if (!voiceUsageIndicator || !usage) return;
-  const remainMin = Math.floor(usage.remainingSeconds / 60);
-  const remainSec = usage.remainingSeconds % 60;
-  voiceUsageIndicator.textContent = `· voice: ${remainMin}m ${remainSec}s left today`;
-  voiceUsageIndicator.classList.toggle('low', usage.remainingSeconds <= 60);
-}
-
-async function loadVoiceUsage() {
-  try {
-    const res = await fetch('/voice/usage', { headers: authHeaders() });
-    if (!res.ok) return;
-    const usage = await res.json();
-    renderVoiceUsage(usage);
-  } catch (err) {
-    console.error('Failed to load voice usage:', err);
-  }
-}
-
-// Sends an audio Blob to the backend and drops the transcript into the
-// composer. Shared by both the recorder and the file-upload path.
-async function transcribeAudioBlob(blob, filename) {
-  setVoiceState(VOICE_STATES.UPLOADING);
-  try {
-    const formData = new FormData();
-    formData.append('audio', blob, filename);
-
-    setVoiceState(VOICE_STATES.TRANSCRIBING);
-    const res = await fetch('/voice/transcribe', {
-      method: 'POST',
-      headers: authHeaders(), // no Content-Type — browser sets multipart boundary
-      body: formData,
-    });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      setVoiceState(VOICE_STATES.ERROR, data.error || 'Could not transcribe that clip.');
-      return;
-    }
-
-    if (inputEl) {
-      // Append rather than overwrite, in case there's already draft text.
-      const existing = inputEl.value.trim();
-      inputEl.value = existing ? `${existing} ${data.transcript}` : data.transcript;
-      autoResize();
-      if (sendBtn) sendBtn.disabled = inputEl.value.trim() === '';
-      inputEl.focus();
-    }
-
-    if (data.usage) renderVoiceUsage(data.usage);
-    setVoiceState(VOICE_STATES.READY);
-  } catch (err) {
-    console.error('Voice transcription request failed:', err);
-    setVoiceState(VOICE_STATES.ERROR, 'Could not reach the server. Please try again.');
-  }
-}
-
-// ── Native browser Speech Recognition (primary path) ──
-// Zero backend/Groq cost. Used whenever the browser supports it; the
-// existing MediaRecorder → /voice/transcribe (Whisper) flow below only
-// runs as a fallback when this API is unavailable.
+// ── Native browser Speech Recognition (only path) ──
 function getSpeechRecognitionCtor() {
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
 }
@@ -616,7 +596,6 @@ function startNativeRecognition() {
 
   nativeRecognition.start();
   nativeRecognizing = true;
-  activeVoicePath = 'native';
   setVoiceState(VOICE_STATES.RECORDING);
   return true;
 }
@@ -625,91 +604,25 @@ function stopNativeRecognition() {
   if (nativeRecognition && nativeRecognizing) nativeRecognition.stop();
 }
 
-// Shown only when falling back to the AI transcription path, so the user
-// understands why this click behaves differently (and that it's metered).
-function showWhisperFallbackNotice() {
-  if (!voiceStatusBar || !voiceStatusText) return;
-  voiceStatusBar.classList.add('visible');
-  voiceStatusBar.classList.remove('error');
-  voiceStatusText.textContent =
-    "Your browser doesn't support native speech recognition. Using AI transcription instead. This consumes your daily voice quota.";
-}
-
-// ── Recording (MediaRecorder) — fallback only ────────
-async function startRecording() {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    setVoiceState(VOICE_STATES.ERROR, 'Voice recording is not supported in this browser.');
-    return;
-  }
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
-    mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-    recordedChunks = [];
-
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) recordedChunks.push(e.data);
-    };
-
-    mediaRecorder.onstop = () => {
-      stream.getTracks().forEach(track => track.stop());
-      const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-      recordedChunks = [];
-      if (blob.size > 0) transcribeAudioBlob(blob, 'recording.webm');
-      else setVoiceState(VOICE_STATES.IDLE);
-    };
-
-    mediaRecorder.start();
-    activeVoicePath = 'whisper';
-    setVoiceState(VOICE_STATES.RECORDING);
-  } catch (err) {
-    console.error('Microphone access failed:', err);
-    setVoiceState(VOICE_STATES.ERROR, 'Microphone access was denied or unavailable.');
-  }
-}
-
-function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop();
-  }
-}
-
 if (micBtn) {
   micBtn.addEventListener('click', () => {
     if (voiceState === VOICE_STATES.RECORDING) {
       if (nativeRecognizing) stopNativeRecognition();
-      else stopRecording();
       return;
     }
     if (voiceState === VOICE_STATES.IDLE || voiceState === VOICE_STATES.READY || voiceState === VOICE_STATES.ERROR) {
       if (getSpeechRecognitionCtor()) {
         startNativeRecognition();
       } else {
-        showWhisperFallbackNotice();
-        setTimeout(() => startRecording(), 1600); // let the notice be read before mic capture begins
+        setVoiceState(VOICE_STATES.ERROR, "Your browser doesn't support voice input.");
       }
     }
   });
 }
 
-// ── Upload existing audio file ───────────────────────
-// (triggered via the attach menu's "Audio clip" option, wired above)
-
-if (audioUploader) {
-  audioUploader.addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    transcribeAudioBlob(file, file.name);
-    audioUploader.value = '';
-  });
-}
-
 if (voiceStatusCancelBtn) {
   voiceStatusCancelBtn.addEventListener('click', () => {
-    if (voiceState === VOICE_STATES.RECORDING) {
-      if (nativeRecognizing) stopNativeRecognition();
-      else stopRecording();
-    }
+    if (voiceState === VOICE_STATES.RECORDING && nativeRecognizing) stopNativeRecognition();
     setVoiceState(VOICE_STATES.IDLE);
   });
 }
@@ -1057,14 +970,16 @@ function appendMessage(role, text, typing = false, imageDataUrl = null, sentAt =
   const content = document.createElement('div');
   content.classList.add('row-content');
 
+  let statusLabelEl = null;
   if (typing) {
     const dots = document.createElement('div');
     dots.classList.add('dots');
     for (let i = 0; i < 3; i++) dots.appendChild(document.createElement('span'));
     content.appendChild(dots);
-    const label = document.createElement('span');
-    label.textContent = 'processing…';
-    content.appendChild(label);
+    statusLabelEl = document.createElement('span');
+    statusLabelEl.classList.add('status-pulse');
+    statusLabelEl.textContent = 'Thinking…';
+    content.appendChild(statusLabelEl);
   } else if (role === 'ai' && text) {
     if (usedSearch) row.appendChild(createLiveBadge());
     content.appendChild(renderMarkdown(text));
@@ -1096,7 +1011,59 @@ function appendMessage(role, text, typing = false, imageDataUrl = null, sentAt =
 
   if (messagesEl) messagesEl.appendChild(row);
   scrollToBottom();
-  return { row, bubble: content };
+  return { row, bubble: content, statusLabel: statusLabelEl };
+}
+
+// ─── DYNAMIC STATUS ANIMATION (Sprint 6) ──────────────
+// Driven entirely by real backend stage events over SSE (see
+// readChatStream below) — no client-side timers or guessed sequences. The
+// backend only ever sends stage keys it actually reached (Objective 2), so
+// this is just a display-label lookup, never a simulation.
+const STAGE_LABELS = {
+  reading_image: 'Reading image…',
+  reading_document: 'Reading document…',
+  thinking: 'Thinking…',
+  searching: 'Searching…',
+  reasoning: 'Reasoning…',
+  generating: 'Generating…',
+};
+
+function setStatus(labelEl, stage) {
+  if (!labelEl) return;
+  labelEl.textContent = STAGE_LABELS[stage] || stage;
+  labelEl.classList.remove('status-swap');
+  // Force reflow so the swap animation can re-trigger on repeated stages.
+  void labelEl.offsetWidth;
+  labelEl.classList.add('status-swap');
+}
+
+// Reads a fetch() Response body as an SSE stream of `data: {...}\n\n`
+// frames and invokes onEvent(parsedObject) for each complete one as it
+// arrives. Resolves once the stream ends. Malformed frames are skipped
+// rather than throwing, so one bad chunk can't kill the whole response.
+async function readChatStream(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let sepIndex;
+    while ((sepIndex = buffer.indexOf('\n\n')) !== -1) {
+      const frame = buffer.slice(0, sepIndex);
+      buffer = buffer.slice(sepIndex + 2);
+      const line = frame.split('\n').find(l => l.startsWith('data: '));
+      if (!line) continue;
+      try {
+        onEvent(JSON.parse(line.slice(6)));
+      } catch (e) {
+        console.warn('Malformed SSE frame:', e);
+      }
+    }
+  }
 }
 
 function typeText(bubble, text, requestId, speed = 14) {
@@ -1144,11 +1111,12 @@ async function sendMessage() {
 
   chatHistory.push({ role: 'user', content: text });
   const imageToSend = attachedImageBase64;
+  const fileToSend = attachedFile;
   appendMessage('user', text, false, imageToSend);
   inputEl.value = '';
   autoResize();
 
-  const { row } = appendMessage('ai', '', true);
+  const { row, statusLabel } = appendMessage('ai', '', true);
   thinkingRow = row;
 
   try {
@@ -1164,23 +1132,60 @@ async function sendMessage() {
         history: chatHistory,
         mode: currentMode,
         sessionId: currentSessionId,
-        image: attachedImageBase64
+        image: attachedImageBase64,
+        file: fileToSend
       }),
     });
 
     if (requestId !== currentRequestId) return;
-    if (res.status === 499) return;
+    if (res.status === 499 || !res.body) return;
 
-    let data;
-    try { data = await res.json(); } catch { return; }
+    if (!res.ok) {
+      // Non-streaming failure (e.g. validation error, 400) — the only case
+      // that still responds as plain JSON, since it happens before the
+      // SSE stream opens server-side (see server.js).
+      let errMsg = 'Error connecting to server. Please try again.';
+      try { const errData = await res.json(); if (errData?.error) errMsg = errData.error; } catch {}
+      if (thinkingRow) { thinkingRow.remove(); thinkingRow = null; }
+      appendMessage('ai', errMsg);
+      return;
+    }
+
+    let finalPayload = null;
+    let streamError = null;
+
+    // Sprint 6 — Objective 1/3: every UI update from here on is driven by
+    // real backend events, not client-side timing. Status text updates
+    // live as `stage` events arrive; it's removed the instant the `final`
+    // event lands (Objective 3: "remove status immediately when response
+    // streaming begins").
+    await readChatStream(res, (evt) => {
+      if (requestId !== currentRequestId) return;
+      if (evt.type === 'stage') {
+        setStatus(statusLabel, evt.stage);
+      } else if (evt.type === 'final') {
+        finalPayload = evt;
+      } else if (evt.type === 'error') {
+        streamError = evt.error || 'Something went wrong. Please try again.';
+      }
+    });
 
     if (requestId !== currentRequestId) return;
 
-    const reply = data.reply || "No response";
-    const usedSearch = !!data.usedSearch;
-    const sources = Array.isArray(data.sources) ? data.sources : [];
-
     if (thinkingRow) { thinkingRow.remove(); thinkingRow = null; }
+
+    if (streamError && !finalPayload) {
+      appendMessage('ai', streamError);
+      return;
+    }
+    if (!finalPayload) {
+      appendMessage('ai', 'No response');
+      return;
+    }
+
+    const reply = finalPayload.reply || "No response";
+    const usedSearch = !!finalPayload.usedSearch;
+    const sources = Array.isArray(finalPayload.sources) ? finalPayload.sources : [];
 
     const { row, bubble } = appendMessage('ai', '');
     if (usedSearch) row.insertBefore(createLiveBadge(), row.firstChild);
@@ -1196,7 +1201,7 @@ async function sendMessage() {
     if (err.name === "AbortError") return;
     if (requestId !== currentRequestId) return;
     console.error(err);
-    if (thinkingRow) thinkingRow.remove();
+    if (thinkingRow) { thinkingRow.remove(); thinkingRow = null; }
     appendMessage('ai', 'Error connecting to server. Please try again.');
   }
 
@@ -1205,6 +1210,7 @@ async function sendMessage() {
     controller = null;
     setStopMode(false);
     clearImageAttachment();
+    clearFileAttachment();
     if (sendBtn) sendBtn.disabled = inputEl.value.trim() === '';
     loadSidebarHistory();
     inputEl.focus();
@@ -1254,7 +1260,6 @@ renderEmptyState();
 (async () => {
   await initAuthToken();
   loadSidebarHistory();
-  loadVoiceUsage();
 })();
 
 // ─── LOGOUT LOGIC ────────────────────────────────────
