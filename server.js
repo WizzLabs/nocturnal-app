@@ -18,9 +18,11 @@ import { formatSearchContext } from './services/search/formatContext.js';
 import * as VisionService from './services/vision/index.js';
 import * as VisionContext from './services/vision/context.js';
 import { buildGroundedPrompt as buildVisionGroundedPrompt } from './services/vision/promptBuilder.js';
+import { score as scoreVisionRelevance } from './lib/visionRelevanceEngine.js';
 import { initSSE, sendStage, sendFinal, sendErrorEvent } from './lib/sse.js';
 import { routeDocument } from './lib/documentRouter.js';
 import * as DocumentService from './services/document/index.js';
+import * as DocumentContext from './services/document/context.js';
 import { buildGroundedPrompt as buildDocumentGroundedPrompt } from './services/document/promptBuilder.js';
 
 dotenv.config();
@@ -207,6 +209,42 @@ const modeInstructions = {
 `,
 };
 
+// Objective 4 — Mode-Aware Status Pipeline. Extra SSE stages emitted
+// between "thinking" and "generating" (or "searching", if the planner
+// routes to search), reflecting the depth of reasoning each mode
+// actually promises in modeInstructions above. Stage keys only — display
+// text lives entirely in the frontend's STAGE_LABELS map (public/script.js),
+// same separation the rest of the stage system already uses.
+const MODE_EXTRA_STAGES = {
+  flash: [],
+  insight: ['analyzing'],
+  abyss: ['thinking_deeply', 'analyzing', 'reasoning'],
+};
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Sprint 8A.8 — bounds a single async phase (currently: document
+// parsing/extraction) to its own timeout budget, independent of any
+// other phase's timer. Resolves to { ok: true, value } on success or
+// { ok: false, timedOut: true } if `ms` elapses first — never throws,
+// so callers can fail closed with a friendly message the same way the
+// rest of the pipeline does. This is deliberately generic (not
+// document-specific) so a future phase (e.g. OCR) can reuse it with its
+// own budget without duplicating the race logic.
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(() => resolve({ ok: false, timedOut: true }), ms);
+  });
+  return Promise.race([
+    promise.then(value => ({ ok: true, value })),
+    timeout,
+  ]).finally(() => clearTimeout(timer));
+}
+
+
 // ─── STRIP MARKDOWN PIPELINE ──────────────────────────
 function stripMarkdown(text) {
   return text
@@ -363,7 +401,46 @@ function buildPersonalitySection(personality) {
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB, matches base64 payload size
 const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024; // 10MB, matches base64 payload size
-const REQUEST_TIMEOUT_MS = 30 * 1000; // upstream AI provider call must resolve within 30s
+const REQUEST_TIMEOUT_MS = 30 * 1000; // Flash/Insight — upstream call must resolve within 30s
+const ABYSS_TIMEOUT_MS = 90 * 1000; // Sprint 7 — Objective 5: Nemotron Ultra 550B needs
+  // substantially longer inference for deep reasoning; Flash/Insight are unaffected.
+
+// Sprint 8A.8 — Bug fix (Insight Request Timeout): document extraction
+// (services/document/index.js — pdf-parse/mammoth/xlsx, and any future
+// OCR step) runs BEFORE the AI generation call and previously had no
+// timeout of its own. Each AI attempt already starts its own fresh
+// REQUEST_TIMEOUT_MS/ABYSS_TIMEOUT_MS window right when the provider
+// call begins (see attemptCompletion below), so generation time was
+// never actually shared with parsing time — but the two phases DID
+// share the single Node-level `server.requestTimeout` socket ceiling
+// below. A large/slow document could silently burn most of that shared
+// ceiling during parsing, leaving too little of it for the LLM call to
+// finish before the socket itself was killed — even though the LLM
+// call's own timer hadn't expired yet. This gives preprocessing its own
+// explicit, bounded budget, independent from generation, so the two
+// phases can be reasoned about (and sized) separately instead of
+// silently competing for one shared window.
+const DOCUMENT_PARSE_TIMEOUT_MS = 45 * 1000; // generous for pdf-parse/mammoth/xlsx on free-tier
+
+// Objective 11 — Friendly Provider Errors. lib/providers/nvidia.js attaches
+// `err.status` (the upstream HTTP status) to every non-2xx response, so this
+// stays a thin, provider-agnostic mapping rather than string-matching raw
+// provider error text (which is fragile and exposes internals). Falls back
+// to a generic message for anything unrecognized — never surfaces a raw
+// stack trace or provider error string to the user.
+function getFriendlyProviderError(err) {
+  const status = err?.status;
+  if (status === 429 || status === 503) {
+    return "NVIDIA is at capacity right now. Please try again in a moment.";
+  }
+  if (status === 401 || status === 403) {
+    return "There's a configuration issue with the AI provider. Please try again later.";
+  }
+  if (typeof status === 'number' && status >= 500) {
+    return "The AI provider is having trouble right now. Please try again in a moment.";
+  }
+  return "❌ Something went wrong. Please try again.";
+}
 
 // Voice input/output is handled entirely client-side via the browser's
 // native Web Speech API (SpeechRecognition/SpeechSynthesis) — see
@@ -400,8 +477,8 @@ function validateChatRequest(body) {
     }
   }
 
-  // Sprint 6b — non-image files (the ones the Document Router/Service will
-  // handle). Images sent through the "Upload File" input are validated
+  // Non-image files (the ones the Document Router/Service will handle).
+  // Images sent through the same unified "Attach Files" input are validated
   // above via the `image` branch instead — server.js bridges those before
   // this function ever sees the request (see the /chat handler).
   if (file && !(typeof file.type === 'string' && file.type.startsWith('image/'))) {
@@ -426,14 +503,15 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
   // Sprint 7: `personality` intentionally NOT destructured from req.body.
   // Personality is always loaded server-side via req.userId (see below) —
   // a client-supplied value is never trusted or used.
-  const { message, history, mode, sessionId, image: rawImage, file } = req.body;
+  const { message, history, mode, sessionId, image: rawImage, file, forceSearch } = req.body;
 
-  // Objective 5/8 — the "Upload File" input accepts both documents and
-  // images (public/index.html's doc-uploader has accept="...,image/*"),
-  // but images must never go through the Document Router — they stay on
-  // the Vision pipeline, same as an image sent via the dedicated photo
-  // uploader. This is just an entry-point normalization, not a merge of
-  // the two services: Vision and Document routers remain fully
+  // The single "Attach Files" input (public/index.html's attach-uploader,
+  // accept="image/*,.pdf,.docx,.txt,.md,.xlsx") can produce either an image
+  // or a document — the user never picks a pipeline manually (Objective 1).
+  // This just normalizes that one entry point into the two variables the
+  // rest of the handler expects; images must still never go through the
+  // Document Router. This is entry-point normalization only, not a merge
+  // of the two services: Vision and Document routers remain fully
   // independent below.
   const image = rawImage || (file && (file.type || '').startsWith('image/') ? file.data : null);
   const documentFile = (file && !(file.type || '').startsWith('image/')) ? file : null;
@@ -451,6 +529,11 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
   // since HTTP headers are already flushed.
   initSSE(res);
 
+  // Objective 9 — Premium Response Metadata: wall-clock time for this
+  // request, measured from the moment the stream opens (matches what the
+  // user actually perceives as "how long did that take").
+  const requestStartedAt = Date.now();
+
   // If the client aborts (Stop button / navigates away), cancel whatever
   // upstream AI call is in flight instead of letting it run to completion
   // for nothing. attemptCompletion() (below) keeps this reference current
@@ -467,7 +550,7 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
   // local tool). Consumes zero search credits, zero planner calls, zero AI
   // tokens. Still persisted to chat_logs like any other turn so history/
   // continuity behave the same as a normal reply.
-  if (!image && !documentFile) {
+  if (!image && !documentFile && !forceSearch) {
     const localMatch = matchLocalTool(message);
     if (localMatch) {
       console.log(`[LocalTool] ${localMatch.name}`);
@@ -481,6 +564,9 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
         mode: localSelectedMode,
         usedSearch: false,
         sources: [],
+        elapsedMs: Date.now() - requestStartedAt,
+        usedVision: false,
+        usedDocument: false,
       });
       return;
     }
@@ -503,6 +589,18 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
     let defaultModel;
     let visionInstruction = null;
     let documentInstruction = null;
+    // Objective 2: only set when a NEW document is attached this turn
+    // (mirrors how `image` itself is null on follow-up turns) — never
+    // populated from the cache reuse branch below, so persistence only
+    // ever writes the turn where the document was actually uploaded.
+    let documentMeta = null;
+    // Sprint 8A.5: the session's cached document (if any), fetched once in
+    // the "no new attachment" branch below and handed to the planner as
+    // documentContext — server.js no longer scores relevance itself (that
+    // was Sprint 8A.3's direct call to DocumentRelevanceEngine; it's now
+    // done once, inside the planner, which is the single source of truth
+    // for whether/how a cached document gets injected this turn).
+    let cachedDocumentForPlanner = null;
 
     if (image) {
       const vision = routeVision();
@@ -523,8 +621,8 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
       });
 
       if (!visionResult.ok) {
-        // Never expose raw provider errors (Objective 9) — friendly
-        // message only. visionResult.error is logged inside VisionService.
+        // Never expose raw provider errors — friendly message only.
+        // visionResult.error is logged inside VisionService.
         sendErrorEvent(res, "I couldn't process that image right now. Please try again in a moment.", 503);
         return;
       }
@@ -556,7 +654,21 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
       // before "Thinking...".
       sendStage(res, 'reading_document');
 
-      const docResult = await DocumentService.extractText({ file: documentFile, type: docRoute.type });
+      // Sprint 8A.8 — Bug fix: bounded so a large/slow document can't
+      // silently consume the generation timeout's share of the shared
+      // socket-level ceiling (see DOCUMENT_PARSE_TIMEOUT_MS above). The
+      // AI generation call gets its own full timeout window regardless
+      // of how long parsing took, as long as parsing itself finishes
+      // within this budget.
+      const parseOutcome = await withTimeout(
+        DocumentService.extractText({ file: documentFile, type: docRoute.type }),
+        DOCUMENT_PARSE_TIMEOUT_MS
+      );
+      if (!parseOutcome.ok) {
+        sendErrorEvent(res, "That document is taking too long to process — please try a smaller file or try again in a moment.", 408);
+        return;
+      }
+      const docResult = parseOutcome.value;
       if (!docResult.ok) {
         const friendly = docResult.error === 'no_text'
           ? "I couldn't find any readable text in that document."
@@ -574,6 +686,26 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
       });
       console.log('[Document] Prompt built');
 
+      // Objective 8: cache this extraction so follow-up questions about
+      // the same document don't re-trigger the Document Service.
+      DocumentContext.setDocument(sessionId, {
+        text: docResult.text,
+        fileName: documentFile.name,
+        docType: docRoute.type,
+        truncated: docResult.truncated,
+      });
+
+      // Objective 2: extracted text + metadata only (no raw file bytes),
+      // persisted below alongside this turn's chat_logs row.
+      const docBase64 = (documentFile.data || '').split(',')[1] || '';
+      documentMeta = {
+        fileName: documentFile.name,
+        docType: docRoute.type,
+        size: Math.ceil(docBase64.length * 0.75),
+        text: docResult.text,
+        truncated: !!docResult.truncated,
+      };
+
       selectedMode = mode === "auto"
         ? autoSelectMode(message)
         : (MODELS[mode] ? mode : "flash");
@@ -589,11 +721,34 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
       // Objective 8: no new image this turn — reuse the last analyzed
       // image's context (if any) for this session so follow-ups like
       // "what color is the car?" stay grounded without another Vision call.
-      const cachedAnalysis = VisionContext.getAnalysis(sessionId);
-      if (cachedAnalysis) {
-        visionInstruction = buildVisionGroundedPrompt({ question: message, analysis: cachedAnalysis });
-        console.log('[Vision] Reusing cached analysis for follow-up');
+      //
+      // Sprint 8A.7 — VisionRelevanceEngine: previously this injected the
+      // cached analysis unconditionally, so an unrelated follow-up ("who
+      // is Messi?") kept getting the old image's description folded into
+      // the prompt. Mirrors DocumentRelevanceEngine's fix for the same
+      // "sticky" bug on the document side — score the question against
+      // the cached analysis and only reuse it when actually relevant.
+      const cachedVisionEntry = VisionContext.getAnalysisEntry(sessionId);
+      if (cachedVisionEntry) {
+        const visionRelevance = scoreVisionRelevance(message, cachedVisionEntry.analysis, cachedVisionEntry.updatedAt);
+        if (visionRelevance.decision === 'USE_VISION') {
+          visionInstruction = buildVisionGroundedPrompt({ question: message, analysis: cachedVisionEntry.analysis });
+          console.log(`[Vision] Reusing cached analysis for follow-up (relevance=${visionRelevance.score})`);
+        } else if (process.env.NODE_ENV !== 'production') {
+          console.log(`[Vision] Cached analysis ignored — not relevant to this turn (relevance=${visionRelevance.score})`);
+        }
       }
+
+      // Sprint 8A.5: no new document this turn — there MAY be a cached
+      // extraction from an earlier upload in this session. Whether it's
+      // actually relevant to THIS question, and whether it should combine
+      // with search (HYBRID), is now decided entirely by Planner V2 below
+      // (see the SEARCH ROUTING block) — server.js just hands the raw
+      // cached document over as documentContext and acts on plan.route.
+      // This replaces Sprint 8A.3's direct DocumentRelevanceEngine.score()
+      // call here, which duplicated a judgment the planner now also makes;
+      // there is now exactly one place relevance is scored per request.
+      cachedDocumentForPlanner = DocumentContext.getDocument(sessionId);
     }
 
     // Objective 2 — "Thinking..." always fires next: after vision analysis
@@ -601,6 +756,20 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
     // matches every flow in the spec (normal, search, vision, document all
     // pass through "Thinking..." at this point).
     sendStage(res, 'thinking');
+
+    // Objective 4 — Mode-Aware Status Pipeline. Insight and Abyss get
+    // additional stages reflecting the deeper reasoning those modes
+    // actually do; Flash has none, so it's completely unaffected (no
+    // added latency, same responsiveness as before this sprint — see
+    // Objective 5's requirement that Flash/Insight stay fast). The small
+    // delay between synthetic stages exists only so each one is actually
+    // perceptible to the user (SSE writes are otherwise near-instant);
+    // it's short and bounded (300ms × at most 3 stages for Abyss) and
+    // dwarfed by real upstream latency in every mode.
+    for (const stage of MODE_EXTRA_STAGES[selectedMode] || []) {
+      await sleep(300);
+      sendStage(res, stage);
+    }
 
     const modeInstruction = modeInstructions[selectedMode];
 
@@ -611,7 +780,6 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
     let searchContextBlock = null;
     let searchSources = [];
     let searchFailed = false;
-    let clarifyQuestion = null;
 
     // Computed fresh per request — single source of truth for "today" in both
     // the planner prompt and the main system prompt below.
@@ -623,22 +791,30 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
       day: 'numeric',
     });
 
-    // ── SEARCH ROUTING (Sprint 3) ──────────────────
-    // Search is an independent capability that sits ABOVE mode selection —
-    // it runs the same way regardless of whether the user picked Flash,
-    // Insight, Abyss, or Auto. selectedMode (already resolved above) is
-    // never read or altered here; this block only decides whether live
-    // search context gets injected before that model answers.
+    // ── SEARCH ROUTING (Sprint 3, upgraded Sprint 8A.5) ─
+    // Search/Document context is an independent capability that sits ABOVE
+    // mode selection — it runs the same way regardless of whether the user
+    // picked Flash, Insight, Abyss, or Auto. selectedMode (already resolved
+    // above) is never read or altered here; this block only decides which
+    // context (if any) gets injected before that model answers.
     //
-    // Images still skip routing entirely: that path is deterministic
-    // (image attached → Vision Service in a future sprint; for now →
-    // abyss directly), same as before.
+    // Images still skip routing entirely: that path is deterministic and
+    // already fully handled above (Vision Service analyzes the image, then
+    // hands its analysis to whichever mode was selected). Vision context
+    // injection is intentionally NOT gated by the planner — it has its own
+    // independent, unconditional cache-reuse mechanism above, unchanged by
+    // this sprint.
     //
-    // lib/searchRouter.js owns the actual decision (via the capability
-    // planner) — this block just acts on whatever it returns:
-    //   CHAT    → answer normally, no search
-    //   SEARCH  → fetch live context, then answer
-    //   CLARIFY → ask a narrowing question before searching
+    // lib/searchRouter.js owns the actual decision (via Planner V2) — this
+    // block just acts on whatever it returns, injecting ONLY the context
+    // the planner actually selected (Sprint 8A.5 — Smart Context
+    // Injection: no more "search AND unconditionally-cached document"
+    // stacking, no more scoring relevance a second time here):
+    //   CHAT     → no document, no search — conversation memory only
+    //   DOCUMENT → cached document only (already scored relevant by the planner)
+    //   SEARCH   → live search context only
+    //   HYBRID   → cached document AND live search — the only route where both combine
+    //   CLARIFY  → ask a narrowing question before answering at all
     {
       const plan = await routeSearchDecision({
         aiClient,
@@ -648,46 +824,93 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
         currentDateString,
         image,
         sessionId,
+        forceSearch,
+        documentContext: cachedDocumentForPlanner,
       });
 
       if (plan.route === 'CLARIFY') {
-        clarifyQuestion = plan.clarify;
+        // Sprint 8A.7 fix: CLARIFY must terminate the request immediately —
+        // no LLM call, no search, no document/vision context injection.
+        // Previously this only set clarifyQuestion and fell through to the
+        // normal pipeline, which still built the full prompt (including
+        // any cached document/vision context) and called the LLM to ask
+        // the clarifying question in its own words. That's unnecessary
+        // cost and a violation of "CLARIFY should ask, not answer" — the
+        // planner already produced the exact question to ask, so we send
+        // it directly, same short-circuit shape as the local-tools branch
+        // near the top of this handler.
         if (process.env.NODE_ENV !== 'production') {
           console.log(`[Planner] clarify: "${plan.clarify}"`);
         }
-      } else if (plan.route === 'SEARCH') {
-        if (process.env.NODE_ENV !== 'production') {
-          console.log(`[Planner] query: "${plan.query}" (category: ${plan.category})`);
+        if (sessionId) {
+          saveConversationToDatabase(sessionId, message, plan.clarify, selectedMode, image, req.userId)
+            .catch(dbErr => console.error("Database storage tracking failure:", dbErr));
         }
-        sendStage(res, 'searching');
-        try {
-          // server.js never talks to a provider or the cache directly —
-          // SearchService owns cache lookup/write and provider resolution
-          // internally and always returns a normalized { provider, query,
-          // results } shape, regardless of which provider is active.
-          const { provider, results } = await SearchService.search(plan.query, {
-            category: plan.category,
+        sendFinal(res, {
+          reply: plan.clarify,
+          mode: selectedMode,
+          usedSearch: false,
+          sources: [],
+          elapsedMs: Date.now() - requestStartedAt,
+          usedVision: false,
+          usedDocument: false,
+        });
+        return;
+      } else {
+        // DOCUMENT or HYBRID: inject the cached document the planner
+        // already judged relevant (document_relevance/decision computed
+        // once, inside the planner — never re-scored here).
+        if ((plan.route === 'DOCUMENT' || plan.route === 'HYBRID') && cachedDocumentForPlanner) {
+          documentInstruction = buildDocumentGroundedPrompt({
+            question: message,
+            docType: cachedDocumentForPlanner.docType,
+            fileName: cachedDocumentForPlanner.fileName,
+            text: cachedDocumentForPlanner.text,
+            truncated: cachedDocumentForPlanner.truncated,
           });
-          console.log(`[Search] ${provider}`);
-          searchContextBlock = formatSearchContext(results, plan.query);
-          searchSources = Array.isArray(results)
-            ? results.filter(r => r?.url && r?.title).map(r => ({ title: r.title, url: r.url }))
-            : [];
-          // Sprint 3.3 — Entity Store: a successful search is one of the
-          // explicit triggers for refreshing the conversation's "current
-          // subject" (see lib/entityStore.js), so the NEXT follow-up can
-          // resolve against it even if this search's own query already
-          // had the pronoun resolved (e.g. re-confirms "Python" after
-          // "latest version of Python" succeeded).
-          recordEntityFromMessage({ sessionId, message: plan.query });
-        } catch (searchErr) {
-          // A failed/misconfigured search provider must never break chat —
-          // fall through with no injected context, same as a CHAT route.
-          // Tagged with reason "search_failed" (Sprint 3.1 decision-reason
-          // taxonomy) purely for debugging — this never reaches the user.
-          console.warn('[SearchRouter] Search step failed (reason=search_failed), proceeding without live context:', searchErr.message);
-          searchFailed = true;
+          console.log(`[Document] Planner selected ${plan.route} — injecting cached document (relevance=${plan.document_relevance})`);
         }
+
+        // SEARCH or HYBRID: fetch live search context.
+        if (plan.route === 'SEARCH' || plan.route === 'HYBRID') {
+          if (process.env.NODE_ENV !== 'production') {
+            console.log(`[Planner] query: "${plan.query}" (category: ${plan.category})`);
+          }
+          sendStage(res, 'searching');
+          try {
+            // server.js never talks to a provider or the cache directly —
+            // SearchService owns cache lookup/write and provider resolution
+            // internally and always returns a normalized { provider, query,
+            // results } shape, regardless of which provider is active.
+            const { provider, results } = await SearchService.search(plan.query, {
+              category: plan.category,
+            });
+            console.log(`[Search] ${provider}`);
+            searchContextBlock = formatSearchContext(results, plan.query);
+            searchSources = Array.isArray(results)
+              ? results.filter(r => r?.url && r?.title).map(r => ({ title: r.title, url: r.url }))
+              : [];
+            // Sprint 3.3 — Entity Store: a successful search is one of the
+            // explicit triggers for refreshing the conversation's "current
+            // subject" (see lib/entityStore.js), so the NEXT follow-up can
+            // resolve against it even if this search's own query already
+            // had the pronoun resolved (e.g. re-confirms "Python" after
+            // "latest version of Python" succeeded).
+            recordEntityFromMessage({ sessionId, message: plan.query });
+          } catch (searchErr) {
+            // A failed/misconfigured search provider must never break chat —
+            // fall through with no injected context, same as a CHAT route.
+            // Tagged with reason "search_failed" (Sprint 3.1 decision-reason
+            // taxonomy) purely for debugging — this never reaches the user.
+            console.warn('[SearchRouter] Search step failed (reason=search_failed), proceeding without live context:', searchErr.message);
+            searchFailed = true;
+          }
+        }
+        // plan.route === 'CHAT' (or DOCUMENT/HYBRID with no cached document
+        // to actually inject) falls through here with nothing injected —
+        // conversation memory (history, already in messagesPayload below)
+        // is the only context, exactly as Objective "CHAT → conversation
+        // memory only" specifies.
       }
     }
 
@@ -701,12 +924,10 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
         ? `\nYou attempted to look up live/current information for this but the search failed. Don't expose any technical/error detail. Briefly and naturally let the user know you couldn't verify it live right now and are answering from existing knowledge, which may not reflect the latest updates — then answer as best you can.\n`
         : '';
 
-    // Sprint 8.5: when the planner routes CLARIFY, the request is too broad
-    // to search well. Rather than guessing, ask the suggested question (in
-    // your own words if you like) instead of attempting a full answer.
-    const clarifyContextSection = clarifyQuestion
-      ? `\nThis request is too broad to answer well or look up as-is. Instead of guessing an answer, briefly and naturally ask the user a short clarifying question to narrow it down before answering. A reasonable question here would be something like: "${clarifyQuestion}" — feel free to phrase it your own way. Don't apologize or over-explain, just ask naturally.\n`
-      : '';
+    // Sprint 8A.7: CLARIFY now short-circuits above (see the SEARCH ROUTING
+    // block) before the prompt is ever assembled, so there is no
+    // clarifyContextSection here anymore — the planner's question is sent
+    // directly, never paraphrased by an LLM call.
 
     // Sprint 4 — Vision Service: internal grounding instruction built from
     // the Vision Analysis (new image this turn) or cached analysis (image
@@ -729,7 +950,7 @@ Today's date is ${currentDateString}. This is injected fresh from the server clo
 
 Behavior:
 ${modeInstruction}
-${personalitySection}${searchContextSection}${clarifyContextSection}${visionContextSection}${documentContextSection}
+${personalitySection}${searchContextSection}${visionContextSection}${documentContextSection}
 Rules:
 - Speak naturally like a human, not a corporate assistant
 - Never say things like "Certainly!", "Of course!", "Great question!"
@@ -785,10 +1006,15 @@ Rules:
       const controller = new AbortController();
       currentController = controller; // lets req.on('close') above cancel this attempt
       let localTimedOut = false;
+      // Objective 5: Abyss gets a longer window — Nemotron Ultra 550B's
+      // deep-reasoning inference routinely exceeds the 30s Flash/Insight
+      // budget. Manual Stop still works normally since it aborts the same
+      // controller via req.on('close') regardless of which timeout is set.
+      const timeoutMs = selectedMode === 'abyss' ? ABYSS_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
       const id = setTimeout(() => {
         localTimedOut = true;
         controller.abort();
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
       try {
         const result = await client.chatComplete({
           model: modelName,
@@ -838,7 +1064,7 @@ Rules:
 
     // Async Database Persistence
     if (sessionId) {
-      saveConversationToDatabase(sessionId, message, reply, selectedMode, image, req.userId)
+      saveConversationToDatabase(sessionId, message, reply, selectedMode, image, req.userId, documentMeta)
         .catch(dbErr => console.error("Database storage tracking failure:", dbErr));
     }
 
@@ -847,6 +1073,9 @@ Rules:
       mode: selectedMode,
       usedSearch: !!searchContextBlock,
       sources: searchContextBlock ? searchSources : [],
+      elapsedMs: Date.now() - requestStartedAt,
+      usedVision: !!visionInstruction,
+      usedDocument: !!documentInstruction,
     });
 
   } catch (err) {
@@ -863,7 +1092,8 @@ Rules:
       return;
     }
     console.error("AI Operations failure:", err);
-    sendErrorEvent(res, "❌ Something went wrong. Please try again.", 500);
+    const status = (typeof err?.status === 'number' && err.status >= 400 && err.status < 600) ? err.status : 500;
+    sendErrorEvent(res, getFriendlyProviderError(err), status);
   }
 });
 
@@ -873,8 +1103,9 @@ Rules:
 // so a DB failure never blocks the response already on its way to the client.
 //
 // Schema columns written here must stay in sync with the SELECT in
-// GET /sessions/:sessionId (user_message, ai_response, mode, attached_asset).
-async function saveConversationToDatabase(sessionId, userMessage, aiResponse, mode, image, userId) {
+// GET /sessions/:sessionId (user_message, ai_response, mode, attached_asset,
+// attached_document).
+async function saveConversationToDatabase(sessionId, userMessage, aiResponse, mode, image, userId, documentMeta) {
   const { error } = await supabase
     .from('chat_logs')
     .insert({
@@ -887,6 +1118,10 @@ async function saveConversationToDatabase(sessionId, userMessage, aiResponse, mo
       // Stored as `attached_asset` to keep the column name provider-agnostic
       // (future sprints may attach other asset types).
       attached_asset: image || null,
+      // Objective 2 — documents persist as extracted text + metadata only
+      // (no raw file bytes): { fileName, docType, size, text, truncated }.
+      // null when no document was attached this turn.
+      attached_document: documentMeta || null,
     });
 
   if (error) throw error;
@@ -947,7 +1182,7 @@ app.get('/sessions/:sessionId', requireAuth, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('chat_logs')
-      .select('user_message, ai_response, mode, attached_asset, created_at')
+      .select('user_message, ai_response, mode, attached_asset, attached_document, created_at')
       .eq('session_id', sessionId)
       .eq('user_id', req.userId)
       .order('created_at', { ascending: true });
@@ -1190,5 +1425,15 @@ const server = app.listen(PORT, () => {
 // Defense-in-depth: caps how long ANY connection can stay open, independent
 // of the per-request AI provider timeout above. Prevents slow/hung clients or
 // network issues from holding sockets open indefinitely.
-server.requestTimeout = 60 * 1000;   // 60s hard ceiling per request
-server.headersTimeout = 65 * 1000;   // must exceed requestTimeout per Node docs
+//
+// Sprint 8A.8 — Bug fix (Insight Request Timeout): this ceiling covers the
+// ENTIRE request lifecycle, including document parsing (DOCUMENT_PARSE_TIMEOUT_MS,
+// which runs before generation starts) as well as the AI generation call
+// itself (up to ABYSS_TIMEOUT_MS, the longest of the per-mode windows). It
+// must exceed the sum of the two worst-case phases with margin — previously
+// it only budgeted for ABYSS_TIMEOUT_MS alone, so a slow document parse could
+// eat into generation's share of this shared ceiling and get a request
+// killed here even though the LLM call's own timer hadn't expired yet.
+const REQUEST_CEILING_MARGIN_MS = 15 * 1000;
+server.requestTimeout = DOCUMENT_PARSE_TIMEOUT_MS + ABYSS_TIMEOUT_MS + REQUEST_CEILING_MARGIN_MS; // 45s + 90s + 15s = 150s hard ceiling per request
+server.headersTimeout = server.requestTimeout + 5 * 1000;  // must exceed requestTimeout per Node docs

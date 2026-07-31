@@ -5,6 +5,7 @@ let attachedFile = null; // { name, type, data } — doc/image attachment, backe
 let chatHistory = [];
 let isThinking = false;
 let currentMode = "flash";
+let forceSearch = false; // Objective 7 — manual search mode toggle
 let controller = null;
 let thinkingRow = null;
 let currentRequestId = 0;
@@ -52,9 +53,9 @@ const menuToggleBtn      = document.getElementById("menu-toggle-btn");
 const sidebarToggleBtn   = document.getElementById("sidebar-toggle-btn");
 const sidebarBackdrop    = document.getElementById("sidebar-backdrop");
 const newChatBtn         = document.getElementById('new-chat-btn');
-const fileUploader       = document.getElementById('file-uploader');
-const docUploader        = document.getElementById('doc-uploader');
+const attachUploader     = document.getElementById('attach-uploader');
 const attachBtn          = document.getElementById('attach-btn');
+const searchToggleBtn    = document.getElementById('search-toggle-btn');
 const imagePreviewBox    = document.getElementById('image-preview-box');
 const previewImg         = document.getElementById('preview-img');
 const removeImgBtn       = document.getElementById('remove-img-btn');
@@ -67,8 +68,7 @@ const historySearchInput = document.getElementById('search-chats');
 // ─── VOICE (STT/TTS) DOM ELEMENTS ────────────────────
 const micBtn              = document.getElementById('mic-btn');
 const attachMenu           = document.getElementById('attach-menu');
-const attachImageOption    = document.getElementById('attach-image-option');
-const attachFileOption     = document.getElementById('attach-file-option');
+const attachFilesOption    = document.getElementById('attach-files-option');
 const voiceStatusBar      = document.getElementById('voice-status-bar');
 const voiceStatusText     = document.getElementById('voice-status-text');
 const voiceStatusCancelBtn = document.getElementById('voice-status-cancel-btn');
@@ -216,7 +216,10 @@ async function switchSession(sessionId) {
     if (data.sessionLogs && data.sessionLogs.length > 0) {
       data.sessionLogs.forEach(log => {
         chatHistory.push({ role: 'user', content: log.user_message });
-        appendMessage('user', log.user_message, false, log.attached_asset || null, log.created_at);
+        const restoredDocMeta = log.attached_document
+          ? { fileName: log.attached_document.fileName, size: log.attached_document.size }
+          : null;
+        appendMessage('user', log.user_message, false, log.attached_asset || null, log.created_at, false, [], restoredDocMeta);
         chatHistory.push({ role: 'assistant', content: log.ai_response });
         appendMessage('ai', log.ai_response, false, null, log.created_at);
       });
@@ -364,6 +367,7 @@ function startNewChat() {
   localStorage.setItem('current_session_id', currentSessionId);
   renderEmptyState();
   clearImageAttachment();
+  clearFileAttachment();
 }
 
 if (newChatBtn) {
@@ -374,9 +378,9 @@ if (newChatBtn) {
   });
 }
 
-// ─── IMAGE UPLOAD HANDLING ───────────────────────────
-// attach-btn (three-dot icon) opens a small menu with "Upload Photo" and
-// "Upload File" instead of going straight to the image picker.
+// ─── ATTACH MENU (toggle) ─────────────────────────────
+// attach-btn (three-dot icon) opens a small menu containing the single
+// "Attach Files" option — see the unified upload handling below.
 // Sprint 6.5: switched from display:none/block toggling to a class-based
 // 'open' state so both the open AND close motion can be animated in CSS
 // (display swaps can't be transitioned).
@@ -396,46 +400,79 @@ if (attachBtn && attachMenu) {
   });
 }
 
-if (attachImageOption) {
-  attachImageOption.addEventListener('click', () => {
-    closeAttachMenu();
-    if (fileUploader) fileUploader.click();
+// ─── MANUAL SEARCH MODE ───────────────────────────────
+// Sprint 7 — Objective 7: when active, every message bypasses planner
+// routing entirely and always searches (server.js / searchRouter.js honor
+// forceSearch). Purely a client-side UI toggle — no persistence beyond the
+// current page session, same lifetime as currentMode.
+if (searchToggleBtn) {
+  searchToggleBtn.addEventListener('click', () => {
+    forceSearch = !forceSearch;
+    searchToggleBtn.classList.toggle('active', forceSearch);
+    searchToggleBtn.title = forceSearch
+      ? 'Manual search mode: ON — every message will search live'
+      : 'Force live search for every message';
   });
 }
 
-if (fileUploader) {
-  fileUploader.addEventListener('change', (e) => {
+// Sprint 7 — Objective 1: single "Attach Files" entry point. The user never
+// picks a pipeline manually; the change handler below auto-detects the
+// attachment type from the picked file and routes to whichever existing
+// pipeline (image compression vs. document read) already handled it before
+// this sprint. The two pipelines themselves — and the backend's Vision vs.
+// Document routing — are unchanged; only the entry point is unified.
+if (attachFilesOption) {
+  attachFilesOption.addEventListener('click', () => {
+    closeAttachMenu();
+    if (attachUploader) attachUploader.click();
+  });
+}
+
+// Mirrors server.js MAX_DOCUMENT_BYTES — only enforced for non-image files;
+// images are downsized client-side instead (see handleImageAttachment).
+const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
+
+if (attachUploader) {
+  attachUploader.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = function(event) {
-      const img = new Image();
-      img.src = event.target.result;
-      img.onload = function() {
-        const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 1024;
-        let width = img.width;
-        let height = img.height;
-
-        if (width > MAX_WIDTH) {
-          height *= MAX_WIDTH / width;
-          width = MAX_WIDTH;
-        }
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(img, 0, 0, width, height);
-          attachedImageBase64 = canvas.toDataURL('image/jpeg', 0.92);
-          if (previewImg) previewImg.src = attachedImageBase64;
-          if (imagePreviewBox) imagePreviewBox.classList.add('show');
-          if (attachBtn) attachBtn.classList.add('has-file');
-        }
-      };
-    };
-    reader.readAsDataURL(file);
+    if ((file.type || '').startsWith('image/')) {
+      handleImageAttachment(file);
+    } else {
+      handleDocumentAttachment(file);
+    }
   });
+}
+
+function handleImageAttachment(file) {
+  const reader = new FileReader();
+  reader.onload = function(event) {
+    const img = new Image();
+    img.src = event.target.result;
+    img.onload = function() {
+      const canvas = document.createElement('canvas');
+      const MAX_WIDTH = 1024;
+      let width = img.width;
+      let height = img.height;
+
+      if (width > MAX_WIDTH) {
+        height *= MAX_WIDTH / width;
+        width = MAX_WIDTH;
+      }
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(img, 0, 0, width, height);
+        attachedImageBase64 = canvas.toDataURL('image/jpeg', 0.92);
+        if (previewImg) previewImg.src = attachedImageBase64;
+        if (imagePreviewBox) imagePreviewBox.classList.add('show');
+        if (attachBtn) attachBtn.classList.add('has-file');
+      }
+    };
+  };
+  reader.readAsDataURL(file);
 }
 
 if (removeImgBtn) {
@@ -444,50 +481,34 @@ if (removeImgBtn) {
 
 function clearImageAttachment() {
   attachedImageBase64 = null;
-  if (fileUploader) fileUploader.value = '';
+  if (attachUploader) attachUploader.value = '';
   if (imagePreviewBox) imagePreviewBox.classList.remove('show');
   if (previewImg) previewImg.src = '';
   if (attachBtn && !attachedFile) attachBtn.classList.remove('has-file');
 }
 
-// ─── DOCUMENT UPLOAD HANDLING (Upload File) ──────────
+// ─── DOCUMENT UPLOAD HANDLING ─────────────────────────
 // Sprint 6b: fully wired to the backend Document Service. PDF, DOCX, TXT,
-// Markdown, and XLSX are parsed and answered from their actual content;
-// images selected here (accept also allows image/*) are routed to the
-// existing Vision pipeline server-side instead — see server.js.
-const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024; // mirrors server.js MAX_DOCUMENT_BYTES
+// Markdown, and XLSX are parsed and answered from their actual content.
+function handleDocumentAttachment(file) {
+  if (file.size > MAX_DOCUMENT_BYTES) {
+    appendMessage('ai', `"${file.name}" is too large (max ${MAX_DOCUMENT_BYTES / (1024 * 1024)}MB).`);
+    if (attachUploader) attachUploader.value = '';
+    return;
+  }
 
-if (attachFileOption) {
-  attachFileOption.addEventListener('click', () => {
-    closeAttachMenu();
-    if (docUploader) docUploader.click();
-  });
-}
-
-if (docUploader) {
-  docUploader.addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    if (file.size > MAX_DOCUMENT_BYTES) {
-      appendMessage('ai', `"${file.name}" is too large (max ${MAX_DOCUMENT_BYTES / (1024 * 1024)}MB).`);
-      e.target.value = '';
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      attachedFile = {
-        name: file.name,
-        type: file.type || 'application/octet-stream',
-        data: event.target.result
-      };
-      if (previewFileName) previewFileName.textContent = file.name;
-      if (filePreviewBox) filePreviewBox.classList.add('show');
-      if (attachBtn) attachBtn.classList.add('has-file');
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    attachedFile = {
+      name: file.name,
+      type: file.type || 'application/octet-stream',
+      data: event.target.result
     };
-    reader.readAsDataURL(file);
-  });
+    if (previewFileName) previewFileName.textContent = file.name;
+    if (filePreviewBox) filePreviewBox.classList.add('show');
+    if (attachBtn) attachBtn.classList.add('has-file');
+  };
+  reader.readAsDataURL(file);
 }
 
 if (removeFileBtn) {
@@ -496,7 +517,7 @@ if (removeFileBtn) {
 
 function clearFileAttachment() {
   attachedFile = null;
-  if (docUploader) docUploader.value = '';
+  if (attachUploader) attachUploader.value = '';
   if (filePreviewBox) filePreviewBox.classList.remove('show');
   if (previewFileName) previewFileName.textContent = '';
   if (attachBtn && !attachedImageBase64) attachBtn.classList.remove('has-file');
@@ -956,7 +977,100 @@ function createSourcesBlock(sources) {
   return wrap;
 }
 
-function appendMessage(role, text, typing = false, imageDataUrl = null, sentAt = null, usedSearch = false, sources = []) {
+// Sprint 7 — Objective 9: minimal, unobtrusive metadata line beneath an
+// assistant reply — "Flash • 1.8 s", "Insight • Search", "Abyss • Vision",
+// "Abyss • Document". Priority when multiple capabilities were used in the
+// same turn: Document > Vision > Search > elapsed time — an attachment or
+// live grounding is more informative to surface than raw latency, but
+// there's always exactly one detail shown to keep this genuinely minimal.
+const MODE_LABELS = { flash: 'Flash', insight: 'Insight', abyss: 'Abyss' };
+
+function createResponseMeta({ mode, elapsedMs, usedVision, usedDocument, usedSearch }) {
+  const modeLabel = MODE_LABELS[mode] || (mode ? mode[0].toUpperCase() + mode.slice(1) : null);
+  if (!modeLabel) return null;
+
+  let detail;
+  if (usedDocument) detail = 'Document';
+  else if (usedVision) detail = 'Vision';
+  else if (usedSearch) detail = 'Search';
+  else if (typeof elapsedMs === 'number' && elapsedMs >= 0) detail = `${(elapsedMs / 1000).toFixed(1)} s`;
+  else return null;
+
+  const meta = document.createElement('div');
+  meta.classList.add('response-meta');
+  meta.textContent = `${modeLabel} • ${detail}`;
+  return meta;
+}
+
+// Sprint 7 — Objective 3: single rendering system for every attachment
+// type. Called once per message from appendMessage() — this is the only
+// place in the app that decides how an attachment looks. Images render as
+// a thumbnail preview (unchanged from before this sprint); documents
+// render as a premium chip (Objective 10): icon + filename + size.
+const DOC_ICON_BY_EXT = {
+  pdf: '📄', docx: '📄', txt: '📄', md: '📄', markdown: '📄',
+  xlsx: '📊', xls: '📊',
+};
+
+function iconForFileName(fileName) {
+  const ext = (fileName || '').split('.').pop().toLowerCase();
+  return DOC_ICON_BY_EXT[ext] || '📄';
+}
+
+function renderAttachment(content, { imageDataUrl, docMeta }) {
+  if (imageDataUrl) {
+    const imgWrap = document.createElement('div');
+    imgWrap.classList.add('chat-image-wrap');
+    const img = document.createElement('img');
+    img.classList.add('chat-image');
+    img.src = imageDataUrl;
+    img.alt = 'Attached image';
+    imgWrap.appendChild(img);
+    content.appendChild(imgWrap);
+    return;
+  }
+  if (docMeta && docMeta.fileName) {
+    const chip = document.createElement('div');
+    chip.classList.add('attachment-chip', 'chat-doc-chip');
+    const icon = document.createElement('span');
+    icon.classList.add('attachment-chip-icon');
+    icon.textContent = iconForFileName(docMeta.fileName);
+    chip.appendChild(icon);
+    const meta = document.createElement('div');
+    meta.classList.add('attachment-chip-meta');
+    const name = document.createElement('span');
+    name.classList.add('attachment-chip-filename');
+    name.textContent = docMeta.fileName;
+    meta.appendChild(name);
+    if (typeof docMeta.size === 'number') {
+      const size = document.createElement('span');
+      size.classList.add('attachment-chip-size');
+      size.textContent = formatFileSize(docMeta.size);
+      meta.appendChild(size);
+    }
+    chip.appendChild(meta);
+    content.appendChild(chip);
+  }
+}
+
+// Shared byte-count formatter for attachment chips (used by renderAttachment
+// above) and approxBase64Bytes below, which mirrors server.js's own
+// approxBytes calculation purely for chip display — the server remains the
+// source of truth for size limits, this is never used for enforcement.
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function approxBase64Bytes(dataUrl) {
+  const match = typeof dataUrl === 'string' && dataUrl.match(/^data:[^;]+;base64,(.+)$/);
+  if (!match) return null;
+  return Math.ceil(match[1].length * 0.75);
+}
+
+function appendMessage(role, text, typing = false, imageDataUrl = null, sentAt = null, usedSearch = false, sources = [], docMeta = null) {
   const row = document.createElement('div');
   row.classList.add('row', role === 'ai' ? 'ai' : 'user');
   if (typing) row.classList.add('thinking');
@@ -988,16 +1102,13 @@ function appendMessage(role, text, typing = false, imageDataUrl = null, sentAt =
     const sourcesBlock = createSourcesBlock(sources);
     if (sourcesBlock) content.appendChild(sourcesBlock);
   } else {
-    if (imageDataUrl) {
-      const imgWrap = document.createElement('div');
-      imgWrap.classList.add('chat-image-wrap');
-      const img = document.createElement('img');
-      img.classList.add('chat-image');
-      img.src = imageDataUrl;
-      img.alt = 'Attached image';
-      imgWrap.appendChild(img);
-      content.appendChild(imgWrap);
-    }
+    // Objective 3 — single rendering system for every attachment type.
+    // renderAttachment() is the one code path that decides what to draw:
+    // images still get a thumbnail preview, documents get a premium chip
+    // (icon + filename + size) — the "one system" is the decision logic
+    // and DOM structure being unified here, not the two attachment types
+    // looking identical, which the spec explicitly says they shouldn't.
+    renderAttachment(content, { imageDataUrl, docMeta });
     if (text) {
       const textNode = document.createElement('div');
       textNode.classList.add('md-line');
@@ -1023,8 +1134,10 @@ const STAGE_LABELS = {
   reading_image: 'Reading image…',
   reading_document: 'Reading document…',
   thinking: 'Thinking…',
-  searching: 'Searching…',
+  thinking_deeply: 'Thinking deeply…',
+  analyzing: 'Analyzing…',
   reasoning: 'Reasoning…',
+  searching: 'Searching…',
   generating: 'Generating…',
 };
 
@@ -1112,7 +1225,10 @@ async function sendMessage() {
   chatHistory.push({ role: 'user', content: text });
   const imageToSend = attachedImageBase64;
   const fileToSend = attachedFile;
-  appendMessage('user', text, false, imageToSend);
+  const docMetaForChip = fileToSend
+    ? { fileName: fileToSend.name, size: approxBase64Bytes(fileToSend.data) }
+    : null;
+  appendMessage('user', text, false, imageToSend, null, false, [], docMetaForChip);
   inputEl.value = '';
   autoResize();
 
@@ -1133,7 +1249,8 @@ async function sendMessage() {
         mode: currentMode,
         sessionId: currentSessionId,
         image: attachedImageBase64,
-        file: fileToSend
+        file: fileToSend,
+        forceSearch
       }),
     });
 
@@ -1186,6 +1303,10 @@ async function sendMessage() {
     const reply = finalPayload.reply || "No response";
     const usedSearch = !!finalPayload.usedSearch;
     const sources = Array.isArray(finalPayload.sources) ? finalPayload.sources : [];
+    const respMode = finalPayload.mode;
+    const respElapsedMs = finalPayload.elapsedMs;
+    const usedVision = !!finalPayload.usedVision;
+    const usedDocument = !!finalPayload.usedDocument;
 
     const { row, bubble } = appendMessage('ai', '');
     if (usedSearch) row.insertBefore(createLiveBadge(), row.firstChild);
@@ -1196,6 +1317,8 @@ async function sendMessage() {
     if (ttsBtn) bubble.appendChild(ttsBtn);
     const sourcesBlock = createSourcesBlock(sources);
     if (sourcesBlock) bubble.appendChild(sourcesBlock);
+    const metaEl = createResponseMeta({ mode: respMode, elapsedMs: respElapsedMs, usedVision, usedDocument, usedSearch });
+    if (metaEl) bubble.appendChild(metaEl);
 
   } catch (err) {
     if (err.name === "AbortError") return;

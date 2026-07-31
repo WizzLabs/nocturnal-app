@@ -40,6 +40,20 @@ export function getAnalysis(sessionId) {
   return entry.analysis;
 }
 
+// Sprint 8A.7: same lookup as getAnalysis(), but also returns the cache
+// timestamp — needed by lib/visionRelevanceEngine.js's recency component.
+// Added as a new export (getAnalysis's own signature/behavior is
+// untouched) so every existing caller keeps working unchanged.
+export function getAnalysisEntry(sessionId) {
+  if (!sessionId) return null;
+  const entry = store.get(sessionId);
+  if (isExpired(entry)) {
+    if (entry) store.delete(sessionId);
+    return null;
+  }
+  return { analysis: entry.analysis, updatedAt: entry.updatedAt };
+}
+
 // Stores/overwrites the Vision Analysis for a session. Called once per
 // successful image analysis — a new image always replaces the old one,
 // since only the most recently uploaded image is relevant to follow-ups.
@@ -54,4 +68,4 @@ export function _clear() {
   store.clear();
 }
 
-export default { getAnalysis, setAnalysis, _clear };
+export default { getAnalysis, getAnalysisEntry, setAnalysis, _clear };

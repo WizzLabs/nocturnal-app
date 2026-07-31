@@ -58,8 +58,8 @@ body::before{
   inset:0;
   pointer-events:none;
   background:
-    radial-gradient(ellipse 900px 600px at 100% 100%, rgba(0,255,102,0.05), transparent 60%),
-    radial-gradient(ellipse 700px 500px at 0% 0%, rgba(0,255,102,0.05), transparent 55%);
+    radial-gradient(ellipse 900px 600px at 100% 100%, rgba(0,255,102,0.03), transparent 60%),
+    radial-gradient(ellipse 700px 500px at 0% 0%, rgba(0,255,102,0.03), transparent 55%);
   z-index:0;
 }
 body::after{
@@ -67,7 +67,7 @@ body::after{
   position:fixed;
   inset:0;
   pointer-events:none;
-  opacity:0.4;
+  opacity:0.22;
   background-image: linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px);
   background-size: 100% 64px;
   animation: gridDrift 18s linear infinite;
@@ -139,8 +139,8 @@ body::after{
   text-transform:uppercase;
 }
 .new-session-btn{
-  font-family:var(--display);
-  font-weight:700;
+  font-family:var(--mono);
+  font-weight:600;
   font-size:11px;
   letter-spacing:.06em;
   color:var(--accent);
@@ -408,8 +408,8 @@ body::after{
   margin-top:20px;
 }
 .modal-btn{
-  font-family:var(--display);
-  font-weight:700;
+  font-family:var(--mono);
+  font-weight:600;
   font-size:11px;
   letter-spacing:.08em;
   text-transform:uppercase;
@@ -840,8 +840,8 @@ body::after{
   position:relative;
 }
 .mode-tab{
-  font-family:var(--display);
-  font-weight:700;
+  font-family:var(--mono);
+  font-weight:600;
   font-size:11.5px;
   letter-spacing:.1em;
   text-transform:uppercase;
@@ -892,6 +892,10 @@ body::after{
 .attach-btn.has-file{ color:var(--accent); }
 .dots-icon{ width:18px; height:18px; }
 
+.search-toggle-btn{ font-size:0; } /* icon-only, no text label */
+.search-icon{ width:18px; height:18px; }
+.search-toggle-btn.active{ color:var(--accent); }
+
 .msg-input{
   flex:1;
   min-width:0;
@@ -910,8 +914,8 @@ body::after{
 .msg-input::placeholder{ color:var(--text-faint); }
 
 .send-btn{
-  font-family:var(--display);
-  font-weight:700;
+  font-family:var(--mono);
+  font-weight:600;
   font-size:12px;
   letter-spacing:.1em;
   color:var(--bg);
@@ -929,27 +933,57 @@ body::after{
   font-family:var(--mono);
   font-size:11px;
   color:var(--text-dim);
+  background:var(--surface-2);
   border:1px solid var(--border-strong);
-  padding:6px 9px;
+  border-radius:2px;
+  padding:6px 10px;
   display:flex;
   align-items:center;
   gap:10px;
+  transition:border-color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
+.attachment-chip:hover{ border-color:var(--accent-dim); }
 .attachment-chip img{
   width:32px; height:32px;
   object-fit:cover;
+  border-radius:2px;
   border:1px solid var(--border);
 }
-.attachment-chip button{ color:var(--text-faint); font-size:13px; }
+.attachment-chip button{ color:var(--text-faint); font-size:13px; transition:color var(--dur) var(--ease); }
 .attachment-chip button:hover{ color:var(--danger); }
 .attachment-chip-filename{
   font-family:var(--mono);
   font-size:11px;
-  color:var(--text-dim);
+  color:var(--text);
   max-width:220px;
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;
+}
+
+/* Objective 3 — unified attachment chip: icon + stacked filename/size,
+   matches the spec's "📄 report.pdf / 842 KB" layout.
+   Objective 10 — premium polish: accent-tinted icon badge, rounded
+   corners, subtle hover state, consistent with .attachment-chip above. */
+.chat-doc-chip{ display:inline-flex; margin-bottom:6px; width:fit-content; }
+.attachment-chip-icon{
+  font-size:15px;
+  line-height:1;
+  flex-shrink:0;
+  width:26px;
+  height:26px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:var(--accent-soft);
+  border-radius:2px;
+}
+.attachment-chip-meta{ display:flex; flex-direction:column; gap:2px; }
+.attachment-chip-size{
+  font-family:var(--mono);
+  font-size:10px;
+  color:var(--text-faint);
+  flex-shrink:0;
 }
 
 .input-hint{
@@ -1229,6 +1263,20 @@ body::after{
 .sources-wrap{
   margin-top:10px;
 }
+
+/* Sprint 7 — Objective 9: minimal, unobtrusive metadata line beneath a
+   reply. Deliberately quiet — faint color, small size, no border/background
+   — so it reads as a footnote, not another UI element competing for
+   attention. */
+.response-meta{
+  margin-top:8px;
+  font-family:var(--mono);
+  font-size:10.5px;
+  letter-spacing:.03em;
+  color:var(--text-faint);
+  opacity:.75;
+}
+
 .sources-btn{
   font-family:var(--mono);
   font-size:11px;

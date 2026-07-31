@@ -293,8 +293,7 @@
         </div>
 
         <div class="input-box">
-          <input type="file" id="file-uploader" accept="image/*" style="display: none;" />
-          <input type="file" id="doc-uploader" accept=".pdf,.docx,.txt,.md,.xlsx,image/*" style="display: none;" />
+          <input type="file" id="attach-uploader" accept="image/*,.pdf,.docx,.txt,.md,.xlsx" style="display: none;" />
           <div class="attach-menu-wrap">
             <button id="attach-btn" class="attach-btn" title="Attach">
               <svg class="dots-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -304,14 +303,17 @@
               </svg>
             </button>
             <div id="attach-menu" class="attach-menu">
-              <button type="button" id="attach-image-option" class="attach-menu-item">
-                <span>Upload Photo</span>
-              </button>
-              <button type="button" id="attach-file-option" class="attach-menu-item">
-                <span>Upload File</span>
+              <button type="button" id="attach-files-option" class="attach-menu-item">
+                <span>Attach Files</span>
               </button>
             </div>
           </div>
+          <button id="search-toggle-btn" class="attach-btn search-toggle-btn" title="Force live search for every message">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.7"/>
+              <line x1="16" y1="16" x2="20.5" y2="20.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+          </button>
           <button id="mic-btn" class="mic-btn" title="Voice input">
             <svg class="mic-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
               <line x1="4" y1="10" x2="4" y2="14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
