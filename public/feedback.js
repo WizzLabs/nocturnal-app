@@ -8,7 +8,7 @@
 const FEEDBACK_FORM_URL = 'https://docs.google.com/forms/d/e/1FAIpQLSekOk0oBA_b1h0ZQIg9qNx-PIYMooKpNUO6pkhbQveVrv69HA/viewform?usp=publish-editor';
 
 // Team member portfolio links — Member 2's is a placeholder, swap it in later.
-const TEAM_MEMBER1_PORTFOLIO_URL = 'https://wizzbot-offi.vercel.app/';
+const TEAM_MEMBER1_PORTFOLIO_URL = 'https://wizzlabs.pages.dev/';
 const TEAM_MEMBER2_PORTFOLIO_URL = 'https://example.com/sharuux-portfolio'; // TODO: replace with real URL
 
 // ─── DOM REFS — Feedback modal ──────────────────────────────────────────

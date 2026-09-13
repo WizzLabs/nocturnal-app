@@ -312,7 +312,7 @@ Because these are on different domains, `FRONTEND_URL` on the Render service mus
 
 Designed and engineered by Wizz.
 
-Portfolio: [https://wizzbot-offi.vercel.app/](https://wizzbot-offi.vercel.app/)
+Portfolio: [https://wizzlabs.pages.dev/](https://wizzlabs.pages.dev/)
 
 ## License
 
