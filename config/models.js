@@ -9,7 +9,7 @@
 // Three tiers: fast/cheap → balanced → deep reasoning.
 // All three are available as explicit modes AND as Auto routing targets.
 export const MODELS = {
-  flash:   "nvidia/nemotron-3.5-lightning-30b-a3b",
+  flash:   "deepseek-ai/deepseek-v4.1-flash",
   insight: "nvidia/nemotron-3-super-120b-a12b",
   abyss:   "nvidia/nemotron-3-ultra-550b-a55b",
 };
