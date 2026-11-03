@@ -439,11 +439,13 @@ body::after{
 
 /* ── Meet the Team modal — two premium member cards, same modal language ── */
 .team-modal-box{ width:min(640px, 92vw); }
-.team-grid{
-  display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:14px;
-  margin-top:4px;
+.team-grid {
+  display: flex;
+  justify-content: center;
+  /* OR use grid: */
+  /* display: grid; */
+  /* grid-template-columns: 1fr; */
+  /* max-width: 400px; margin: 0 auto; */
 }
 .team-card{
   display:flex;
