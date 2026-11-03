@@ -438,14 +438,17 @@ body::after{
 .modal-actions-stacked .modal-btn{ width:100%; }
 
 /* ── Meet the Team modal — two premium member cards, same modal language ── */
-.team-modal-box{ width:min(640px, 92vw); }
+.team-modal-box {
+  max-width: 400px; /* Shrinks the box so it hugs the card */
+  width: 100%;
+  margin: 0 auto;
+}
+/* This ensures the card stays centered if you ever add another one, 
+   but right now it will just perfectly fill the 400px box */
 .team-grid {
   display: flex;
   justify-content: center;
-  /* OR use grid: */
-  /* display: grid; */
-  /* grid-template-columns: 1fr; */
-  /* max-width: 400px; margin: 0 auto; */
+  width: 100%;
 }
 .team-card{
   display:flex;
