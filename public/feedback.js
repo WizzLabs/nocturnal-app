@@ -1,28 +1,24 @@
-// ─── FEEDBACK.JS (Sprint 7.2 — Release Candidate polish) ───────────────────
-// Handles the "Feedback" modal and the "Meet the Team" modal it opens into.
-// No server calls, no stored state. URLs live in one place here so they're
-// easy to change later without hunting through the codebase.
-//
-// Does NOT touch script.js, settings.js, or personality.js.
+// ─── FEEDBACK.JS (Solo Creator Update) ───────────────────────────────────
+// Handles the "Feedback" modal and the "Meet the Creator" modal it opens into.
 
 const FEEDBACK_FORM_URL = 'https://docs.google.com/forms/d/e/1FAIpQLSekOk0oBA_b1h0ZQIg9qNx-PIYMooKpNUO6pkhbQveVrv69HA/viewform?usp=publish-editor';
 
-// Team member portfolio links — Member 2's is a placeholder, swap it in later.
+// Team member portfolio links
 const TEAM_MEMBER1_PORTFOLIO_URL = 'https://wizzlabs.pages.dev/';
-const TEAM_MEMBER2_PORTFOLIO_URL = 'https://example.com/sharuux-portfolio'; // TODO: replace with real URL
+// ❌ Removed TEAM_MEMBER2_PORTFOLIO_URL
 
 // ─── DOM REFS — Feedback modal ──────────────────────────────────────────
 const feedbackOverlayEl    = document.getElementById('feedback-overlay');
 const feedbackOpenBtn      = document.getElementById('feedback-btn');
 const feedbackCloseBtn     = document.getElementById('feedback-close-btn');
 const feedbackReportBtn    = document.getElementById('feedback-report-btn');
-const feedbackPortfolioBtn = document.getElementById('feedback-portfolio-btn'); // now opens the Team modal
+const feedbackPortfolioBtn = document.getElementById('feedback-portfolio-btn'); 
 
-// ─── DOM REFS — Meet the Team modal ─────────────────────────────────────
+// ─── DOM REFS — Meet the Creator modal ──────────────────────────────────
 const teamOverlayEl   = document.getElementById('team-overlay');
 const teamCloseBtn    = document.getElementById('team-close-btn');
 const teamMember1Btn  = document.getElementById('team-member1-btn');
-const teamMember2Btn  = document.getElementById('team-member2-btn');
+// ❌ Removed teamMember2Btn ref
 
 function openFeedbackModal() {
   feedbackOverlayEl.classList.add('open');
@@ -49,26 +45,24 @@ if (feedbackOpenBtn) feedbackOpenBtn.addEventListener('click', openFeedbackModal
 if (feedbackCloseBtn) feedbackCloseBtn.addEventListener('click', closeFeedbackModal);
 if (feedbackOverlayEl) {
   feedbackOverlayEl.addEventListener('click', (e) => {
-    if (e.target === feedbackOverlayEl) closeFeedbackModal(); // click outside modal box
+    if (e.target === feedbackOverlayEl) closeFeedbackModal(); 
   });
 }
 if (feedbackReportBtn) {
   feedbackReportBtn.addEventListener('click', () => openInNewTab(FEEDBACK_FORM_URL));
 }
 if (feedbackPortfolioBtn) {
-  feedbackPortfolioBtn.addEventListener('click', openTeamModal); // "Meet the Team" now opens the modal
+  feedbackPortfolioBtn.addEventListener('click', openTeamModal); 
 }
 
-// ─── LISTENERS — Meet the Team modal ────────────────────────────────────
+// ─── LISTENERS — Meet the Creator modal ─────────────────────────────────
 if (teamCloseBtn) teamCloseBtn.addEventListener('click', closeTeamModal);
 if (teamOverlayEl) {
   teamOverlayEl.addEventListener('click', (e) => {
-    if (e.target === teamOverlayEl) closeTeamModal(); // click outside modal box
+    if (e.target === teamOverlayEl) closeTeamModal(); 
   });
 }
 if (teamMember1Btn) {
   teamMember1Btn.addEventListener('click', () => openInNewTab(TEAM_MEMBER1_PORTFOLIO_URL));
 }
-if (teamMember2Btn) {
-  teamMember2Btn.addEventListener('click', () => openInNewTab(TEAM_MEMBER2_PORTFOLIO_URL));
-}
+// ❌ Removed teamMember2Btn listener
